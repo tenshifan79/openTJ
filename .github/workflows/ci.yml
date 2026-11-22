@@ -97,9 +97,27 @@ jobs:
           retention-days: 14
 
   e2e:
-    name: Container and browser tests
+    name: Browser and API tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Neither suite touches PDF storage, so they run against the development
+      # server directly instead of the container stack (see the stack job).
+      STORAGE_DRIVER: local
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: opentj
+          POSTGRES_USER: opentj
+          POSTGRES_PASSWORD: opentj
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opentj -d opentj"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -110,9 +128,12 @@ jobs:
 
       - run: npm ci --include=dev --engine-strict
       - run: npx playwright install --with-deps chromium
+      - run: npm run db:generate
+      - run: npm run db:migrate
+      - run: npm run db:seed
 
-      - name: Build and start the complete stack
-        run: docker compose up --detach --build
+      - name: Start the development server
+        run: nohup npm run dev -- --hostname 127.0.0.1 > web.log 2>&1 &
 
       - name: Wait for the web health contract
         env:
@@ -129,13 +150,6 @@ jobs:
       - name: Verify persistent API workflows
         run: npm run test:api
 
-      - name: Verify private PDF lifecycle through MinIO and ClamAV
-        run: npm run test:uploads
-
-      - name: Capture container logs
-        if: failure()
-        run: docker compose logs --no-color > docker-compose.log
-
       - name: Upload browser diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -144,7 +158,51 @@ jobs:
           path: |
             playwright-report/
             test-results/
-            docker-compose.log
+            web.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The PDF lifecycle needs the MinIO and ClamAV containers. MinIO withdrew its
+  # public images (minio/mc from Docker Hub, quay.io/minio/minio from anonymous
+  # pulls) in September 2026, so docker-compose.yml cannot start as pinned.
+  # Replace MINIO_IMAGE and MINIO_MC_IMAGE with a maintained S3-compatible
+  # image, then set the repository variable CONTAINER_STACK to "enabled".
+  stack:
+    name: Container stack and PDF lifecycle
+    if: vars.CONTAINER_STACK == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.9.0'
+          cache: npm
+
+      - run: npm ci --include=dev --engine-strict
+
+      - name: Build and start the complete stack
+        run: docker compose up --detach --build
+
+      - name: Wait for the web health contract
+        env:
+          HEALTH_TIMEOUT_MS: "600000"
+        run: node scripts/wait-for-health.mjs
+
+      - name: Verify private PDF lifecycle through MinIO and ClamAV
+        run: npm run test:uploads
+
+      - name: Capture container logs
+        if: failure()
+        run: docker compose logs --no-color > docker-compose.log
+
+      - name: Upload container diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-stack-logs
+          path: docker-compose.log
           if-no-files-found: ignore
           retention-days: 14
 
