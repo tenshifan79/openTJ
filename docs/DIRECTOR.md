@@ -66,7 +66,10 @@ TRUST_PROXY=true
   run `SET search_path TO opentj;` before querying.
 - **Ion.** Register a *Confidential*, *Authorization code* application at
   `https://ion.tjhsst.edu/oauth/applications/` with the redirect URI above. Ion
-  shows the client secret only when it is created.
+  shows the client secret only when it is created. If sign-in ends on the login
+  page with "ION sign-in could not be completed", the Process Log has the cause
+  in an `ION sign-in failed` line; `ION token endpoint answered 401
+  invalid_client`, for example, means the client ID or secret here is wrong.
 - **Session secret.** Generate it on the host so it never leaves it:
   `printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> /site/private/opentj.env`
 - **Uploads.** Director has no object storage or virus scanner and limits

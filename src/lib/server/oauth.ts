@@ -14,8 +14,9 @@ export const ionProfileSchema = z
     username: z.string().min(1).max(100).optional(),
     full_name: z.string().min(1).max(200).optional(),
     display_name: z.string().min(1).max(200).optional(),
-    first_name: z.string().max(100).optional(),
-    last_name: z.string().max(100).optional(),
+    // ION stores these as nullable and sends null for an account without them.
+    first_name: z.string().max(100).nullish(),
+    last_name: z.string().max(100).nullish(),
     is_student: z.boolean().optional().default(false),
     is_teacher: z.boolean().optional().default(false),
   })
@@ -172,8 +173,27 @@ async function upsertIonUser(profile: z.infer<typeof ionProfileSchema>): Promise
   return { id, username, displayName: name, isStudent, isTeacher, accountStatus };
 }
 
-export async function finishIonAuthorization(callbackUrl: URL, binding?: string): Promise<{ user: PublicUser; returnTo: string }> {
-  const state = callbackUrl.searchParams.get("state");
+/**
+ * Says why a sign-in failed, for the server log. The login page only shows a general
+ * message, so this is the one place the cause is recorded. It never includes the
+ * authorization code, state, tokens or profile values.
+ */
+export function describeIonFailure(error: unknown): string {
+  const reason = error instanceof AppError && error.code === "ION_LOGIN_FAILED" ? error.cause : error;
+  const word = (value: unknown) => String(value).replace(/[^\w.-]/g, "?").slice(0, 60);
+  if (reason instanceof AppError) return reason.code;
+  if (reason instanceof oauth.ResponseBodyError) return `ION token endpoint answered ${reason.status} ${word(reason.error)}`;
+  if (reason instanceof oauth.AuthorizationResponseError) return `ION authorization answered ${word(reason.error)}`;
+  if (reason instanceof z.ZodError) return `ION profile fields not understood: ${[...new Set(reason.issues.map((issue) => issue.path.join(".") || "profile"))].join(", ")}`;
+  if (!(reason instanceof Error)) return "unknown";
+  // Database errors can quote the values involved, so only their kind is recorded.
+  if (reason.name.startsWith("PrismaClient")) return "code" in reason ? `${reason.name} ${word(reason.code)}` : reason.name;
+  const cause = reason.cause instanceof Error && "code" in reason.cause ? ` (${word(reason.cause.code)})` : "";
+  return `${reason.name}: ${(reason.message.split("\n", 1)[0] ?? "").slice(0, 200)}${cause}`;
+}
+
+export async function finishIonAuthorization(query: URLSearchParams, binding?: string): Promise<{ user: PublicUser; returnTo: string }> {
+  const state = query.get("state");
   if (!state || state.length > 200 || !binding || binding.length > 200) throw new AppError(400, "OAUTH_STATE_MISSING", "ION login state was missing.");
   const transaction = await db.oAuthTransaction.findUnique({ where: { stateHash: sha256(state) } });
   if (!transaction || transaction.expiresAt <= new Date() || !safeEqual(transaction.browserHash, sha256(binding))) {
@@ -186,7 +206,9 @@ export async function finishIonAuthorization(callbackUrl: URL, binding?: string)
   const { server, client, clientAuth, redirectUri } = oauthConfiguration();
   let accessToken: string | undefined;
   try {
-    const parameters = oauth.validateAuthResponse(server, client, callbackUrl, state);
+    // oauth4webapi accepts only a genuine URL or URLSearchParams. A Next.js route's
+    // request.nextUrl is neither, so it is given a plain copy of the query instead.
+    const parameters = oauth.validateAuthResponse(server, client, new URLSearchParams(query), state);
     const tokenResponse = await oauth.authorizationCodeGrantRequest(
       server,
       client,
@@ -205,7 +227,7 @@ export async function finishIonAuthorization(callbackUrl: URL, binding?: string)
     return { user, returnTo: sanitizeReturnTo(transaction.returnTo) };
   } catch (error: unknown) {
     if (error instanceof AppError) throw error;
-    throw new AppError(400, "ION_LOGIN_FAILED", "ION login could not be completed.");
+    throw new AppError(400, "ION_LOGIN_FAILED", "ION login could not be completed.", undefined, { cause: error });
   } finally {
     if (accessToken) await revokeIonToken(accessToken);
   }
