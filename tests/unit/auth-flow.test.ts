@@ -29,6 +29,9 @@ describe("ION authentication boundaries", () => {
     expect(ionProfileSchema.parse({ id: 3, ion_username: "student", phones: ["private"] })).toMatchObject({ username: "student" });
     expect(ionProfileSchema.parse({ id: 3, ion_username: "student", phones: ["private"] })).not.toHaveProperty("phones");
   });
+  it("accepts the null names ION sends for an account without them", () => {
+    expect(ionProfileSchema.parse({ id: 4, ion_username: "service", full_name: "None None", first_name: null, last_name: null, title: null })).toMatchObject({ username: "service" });
+  });
   it.each(["/courses/../../evil", "/courses/%2e%2e/admin", "/courses/%5c/evil", "/courses\n//evil"])("rejects malformed return URL %s", value => expect(sanitizeReturnTo(value)).toBe("/courses"));
   it("requires the same browser and consumes state exactly once with S256 PKCE", async () => {
     const start = await beginIonAuthorization("/courses/concrete-math-av-p4/notes");
@@ -36,7 +39,7 @@ describe("ION authentication boundaries", () => {
     expect(start.url.searchParams.get("code_challenge_method")).toBe("S256");
     const callback = new URL("http://localhost:3000/api/v1/auth/ion/callback");
     callback.searchParams.set("state", start.url.searchParams.get("state")!); callback.searchParams.set("code", "test-code");
-    await expect(finishIonAuthorization(callback, "different-browser")).rejects.toMatchObject({ code: "OAUTH_STATE_INVALID" });
+    await expect(finishIonAuthorization(callback.searchParams, "different-browser")).rejects.toMatchObject({ code: "OAUTH_STATE_INVALID" });
     expect(mocked.transaction).not.toBeNull();
     const verifier = mocked.transaction!.codeVerifier;
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -47,9 +50,9 @@ describe("ION authentication boundaries", () => {
       return Response.json({ id: 123, ion_username: "student", display_name: "Fictional Student", is_student: true, is_teacher: false });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const result = await finishIonAuthorization(callback, start.binding);
+    const result = await finishIonAuthorization(callback.searchParams, start.binding);
     expect(result.user.username).toBe("student"); expect(result.returnTo).toBe("/courses/concrete-math-av-p4/notes");
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await expect(finishIonAuthorization(callback, start.binding)).rejects.toMatchObject({ code: "OAUTH_STATE_INVALID" });
+    await expect(finishIonAuthorization(callback.searchParams, start.binding)).rejects.toMatchObject({ code: "OAUTH_STATE_INVALID" });
   });
 });
