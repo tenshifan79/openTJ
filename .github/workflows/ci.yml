@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -96,9 +97,27 @@ jobs:
           retention-days: 14
 
   e2e:
-    name: Container and browser tests
+    name: Browser and API tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Neither suite touches PDF storage, so they run against the development
+      # server directly instead of the container stack (see the stack job).
+      STORAGE_DRIVER: local
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: opentj
+          POSTGRES_USER: opentj
+          POSTGRES_PASSWORD: opentj
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opentj -d opentj"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -109,9 +128,12 @@ jobs:
 
       - run: npm ci --include=dev --engine-strict
       - run: npx playwright install --with-deps chromium
+      - run: npm run db:generate
+      - run: npm run db:migrate
+      - run: npm run db:seed
 
-      - name: Build and start the complete stack
-        run: docker compose up --detach --build
+      - name: Start the development server
+        run: nohup npm run dev -- --hostname 127.0.0.1 > web.log 2>&1 &
 
       - name: Wait for the web health contract
         env:
@@ -128,13 +150,6 @@ jobs:
       - name: Verify persistent API workflows
         run: npm run test:api
 
-      - name: Verify private PDF lifecycle through MinIO and ClamAV
-        run: npm run test:uploads
-
-      - name: Capture container logs
-        if: failure()
-        run: docker compose logs --no-color > docker-compose.log
-
       - name: Upload browser diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -143,7 +158,51 @@ jobs:
           path: |
             playwright-report/
             test-results/
-            docker-compose.log
+            web.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The PDF lifecycle needs the MinIO and ClamAV containers. MinIO withdrew its
+  # public images (minio/mc from Docker Hub, quay.io/minio/minio from anonymous
+  # pulls) in September 2026, so docker-compose.yml cannot start as pinned.
+  # Replace MINIO_IMAGE and MINIO_MC_IMAGE with a maintained S3-compatible
+  # image, then set the repository variable CONTAINER_STACK to "enabled".
+  stack:
+    name: Container stack and PDF lifecycle
+    if: vars.CONTAINER_STACK == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.9.0'
+          cache: npm
+
+      - run: npm ci --include=dev --engine-strict
+
+      - name: Build and start the complete stack
+        run: docker compose up --detach --build
+
+      - name: Wait for the web health contract
+        env:
+          HEALTH_TIMEOUT_MS: "600000"
+        run: node scripts/wait-for-health.mjs
+
+      - name: Verify private PDF lifecycle through MinIO and ClamAV
+        run: npm run test:uploads
+
+      - name: Capture container logs
+        if: failure()
+        run: docker compose logs --no-color > docker-compose.log
+
+      - name: Upload container diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-stack-logs
+          path: docker-compose.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -192,11 +251,43 @@ jobs:
           chmod +x release/*.sh
           mkdir release-artifacts
           tar -czf release-artifacts/opentj-director-linux-x64.tar.gz -C release .
+          cp release/deploy.sh release-artifacts/deploy.sh
           cd release-artifacts
-          sha256sum opentj-director-linux-x64.tar.gz > SHA256SUMS
+          sha256sum opentj-director-linux-x64.tar.gz deploy.sh > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: opentj-director-linux-x64
           path: release-artifacts/
           compression-level: 0
           retention-days: 30
+
+  # Workflow artifacts expire and need a GitHub sign-in to download. A release
+  # asset is permanent and public, so the host can fetch it with plain curl.
+  release:
+    name: Publish Director release
+    needs: deployment
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: opentj-director-linux-x64
+          path: release-artifacts
+      - name: Publish the tested package and keep the five newest
+        working-directory: release-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha256sum -c SHA256SUMS
+          tag="director-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
+          gh release create "$tag" opentj-director-linux-x64.tar.gz SHA256SUMS deploy.sh \
+            --target "$GITHUB_SHA" --latest \
+            --title "Director package ${GITHUB_SHA:0:7}" \
+            --notes "Prebuilt and tested for Director (Node 22.9, Debian). Install or update with deploy.sh; see docs/DIRECTOR.md."
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq 'map(select(.tagName | startswith("director-"))) | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+            while read -r old; do gh release delete "$old" --yes --cleanup-tag; done

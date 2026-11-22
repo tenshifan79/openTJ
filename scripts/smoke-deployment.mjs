@@ -50,8 +50,15 @@ try {
     method: "POST", headers: { "Content-Type": "application/json", Origin: env.APP_URL }, body: JSON.stringify({ persona: "student" }),
   });
   assert.ok(login.status >= 400, "Production package exposed development login");
-  const status = await readFile(`/proc/${web.pid}/status`, "utf8");
-  console.log(`Packaged web process after health/login/static requests: ${status.match(/^VmRSS:.*$/m)?.[0]}`);
+  // run.sh supervises the server, so measure its child rather than the shell.
+  const children = (await readFile(`/proc/${web.pid}/task/${web.pid}/children`, "utf8").catch(() => "")).trim().split(/\s+/).filter(Boolean);
+  let largest = { rss: 0, anon: 0 };
+  for (const pid of [web.pid, ...children]) {
+    const status = await readFile(`/proc/${pid}/status`, "utf8").catch(() => "");
+    const rss = Number(status.match(/^VmRSS:\s+(\d+)/m)?.[1] ?? 0);
+    if (rss > largest.rss) largest = { rss, anon: Number(status.match(/^RssAnon:\s+(\d+)/m)?.[1] ?? 0) };
+  }
+  console.log(`Packaged web process after health/login/static requests: VmRSS: ${largest.rss} kB (private: ${largest.anon} kB)`);
   console.log("PASS: archive migrations, production seed, worker startup, web health, static assets and disabled development login");
 } finally {
   web.kill("SIGTERM");

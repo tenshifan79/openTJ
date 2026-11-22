@@ -5,12 +5,13 @@ import { requireCourseAccess, requirePolicyAccepted, requireUser } from "@/lib/s
 import { db } from "@/lib/server/db";
 import { sha256 } from "@/lib/server/crypto";
 import { apiData, AppError, readLimitedBody, withApi } from "@/lib/server/http";
-import { deleteObject, writeObject } from "@/lib/server/storage";
+import { deleteObject, uploadsDisabled, writeObject } from "@/lib/server/storage";
 import { publicUpload } from "@/lib/server/uploads";
 
 const maxBytes = Math.min(Number(process.env.PDF_MAX_BYTES) || 20 * 1024 * 1024, 20 * 1024 * 1024);
 export const POST = withApi(async (request, _context, { requestId }) => {
   await requireUser(request);
+  if (uploadsDisabled()) throw new AppError(503, "UPLOADS_DISABLED", "PDF uploads are not available on this site. Use plain text or Markdown notes instead.");
   const key = z.string().uuid().parse(request.headers.get("idempotency-key"));
   if (!request.headers.get("content-type")?.startsWith("multipart/form-data;")) throw new AppError(415, "PDF_REQUIRED", "Submit a PDF file.");
   const bytes = await readLimitedBody(request, maxBytes + 64 * 1024);

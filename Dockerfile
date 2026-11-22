@@ -67,5 +67,5 @@ CMD ["node", "server.js"]
 FROM scratch AS deployment
 COPY --from=runner /app /web
 COPY --from=tasks /app /tasks
-COPY deployment/load-env.mjs deployment/runtime-env.mjs deployment/run.sh deployment/migrate.sh deployment/worker.sh /
+COPY deployment/load-env.mjs deployment/runtime-env.mjs deployment/run.sh deployment/migrate.sh deployment/worker.sh deployment/deploy.sh /
 COPY scripts/check-env.mjs /check-env.mjs
