@@ -50,6 +50,7 @@ ION_PROFILE_URL=https://ion.tjhsst.edu/api/profile
 ION_REVOKE_URL=https://ion.tjhsst.edu/oauth/revoke_token/
 SESSION_SECRET=
 BOOTSTRAP_ADMIN_ION_IDS=
+OPENTJ_DB_SCHEMA=opentj
 STORAGE_DRIVER=disabled
 TRUST_PROXY=true
 ```
@@ -58,6 +59,11 @@ TRUST_PROXY=true
   copy the URL into this file, because Director can change it. The launcher
   adds `connection_limit=3` unless the URL already sets one (`OPENTJ_DB_POOL`
   changes the number).
+- **Schema.** Director's database user cannot create tables in the `public`
+  schema (PostgreSQL 15 and later; migrations fail with `permission denied for
+  schema public`). `OPENTJ_DB_SCHEMA=opentj` keeps all tables in a schema the
+  site owns, which the first migration creates. In Director's Database shell
+  run `SET search_path TO opentj;` before querying.
 - **Ion.** Register a *Confidential*, *Authorization code* application at
   `https://ion.tjhsst.edu/oauth/applications/` with the redirect URI above. Ion
   shows the client secret only when it is created.
