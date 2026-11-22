@@ -11,7 +11,12 @@ function localPath(key: string) {
   if (!target.startsWith(root + sep)) throw new Error("Storage path escaped root");
   return target;
 }
+/** Hosts without private object storage or a scanner run with PDF uploads off. */
+export function uploadsDisabled(): boolean {
+  return process.env.STORAGE_DRIVER === "disabled";
+}
 function local() {
+  if (uploadsDisabled()) throw new Error("File storage is disabled");
   if (process.env.STORAGE_DRIVER === "local") {
     if (process.env.NODE_ENV === "production") throw new Error("Production requires private S3 storage");
     return true;
