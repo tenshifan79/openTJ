@@ -8,7 +8,7 @@ const operations = JSON.parse(await readFile(resolve(directory, "tasks/package.j
 for (const [name, version] of Object.entries(operations.dependencies)) {
   assert.equal(version, rootPackage.dependencies[name] || rootPackage.devDependencies[name], `${name} must match the application`);
 }
-for (const path of ["web/server.js", "web/.next/static", "web/public", "web/node_modules/.prisma/client/schema.prisma", "tasks/node_modules/.prisma/client/schema.prisma", "tasks/node_modules/prisma/build/index.js", "tasks/src/worker.ts", "tasks/scripts/pdf-inspect.mjs", "tasks/prisma/migrations", "run.sh", "migrate.sh", "worker.sh", "load-env.mjs", "runtime-env.mjs", "check-env.mjs"]) {
+for (const path of ["web/server.js", "web/.next/static", "web/public", "web/node_modules/.prisma/client/schema.prisma", "tasks/node_modules/.prisma/client/schema.prisma", "tasks/node_modules/prisma/build/index.js", "tasks/src/worker.ts", "tasks/scripts/pdf-inspect.mjs", "tasks/prisma/migrations", "run.sh", "migrate.sh", "worker.sh", "deploy.sh", "load-env.mjs", "runtime-env.mjs", "check-env.mjs"]) {
   await access(resolve(directory, path));
 }
 for (const name of ["next", "vitest", "eslint", "playwright", "@playwright/test", "embedded-postgres", "typescript"]) {
