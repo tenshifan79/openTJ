@@ -1,117 +1,121 @@
-# Deploying the prepared Director package
+# Running openTJ on Director
 
-GitHub Actions builds and tests the application on Linux with Node 22.9.0.
-After both test jobs pass, the **Prepare Director download** job creates the
-`opentj-director-linux-x64` artifact. It contains a tar.gz archive and SHA-256
-checksum. Director does not need to run npm install, npm ci, Prisma generation,
-or next build when using this package.
+Director gives each site about 95 MiB of RAM (plus the same again in swap) and
+at most one CPU. `npm ci` and `next build` do not fit, so nothing is built there.
+GitHub Actions builds and tests the application on Node 22.9.0, then the
+**Publish Director release** job attaches three files to a GitHub release:
 
-The archive contains `web/` (Next.js standalone runtime), `tasks/` (only database
-and PDF-worker dependencies), and launch scripts. The preparation job tests the
-exported files against PostgreSQL, starts the worker once and checks production
-web health, a page, static assets and development-login rejection. Other CI jobs
-test the complete application with MinIO and ClamAV.
+- `opentj-director-linux-x64.tar.gz`: `web/` (Next.js standalone server),
+  `tasks/` (migrations, seed, worker) and the launch scripts
+- `SHA256SUMS`
+- `deploy.sh`, the installer
 
-## 1. Get the package
+Release assets are public and permanent, so Director downloads them with curl.
+The five newest packages are kept. To rebuild without a commit, run the CI
+workflow from the Actions tab (**Run workflow** on `main`).
 
-Open the latest successful main-branch run on the repository's **Actions** tab.
-Download **opentj-director-linux-x64** from its Artifacts section while signed in
-to GitHub. Unzip the download on your computer; it contains
-`opentj-director-linux-x64.tar.gz` and `SHA256SUMS`.
+## One-time setup
 
-Upload those two files to `/site/private/` using your Director file-transfer
-access. Keep the archive private, outside the public document directory.
-GitHub Actions artifact downloads require GitHub authentication; their web page
-URLs cannot simply be passed to unauthenticated wget on Director.
+1. In Director choose the **Node.js 22.9 (Debian)** image (the package is
+   glibc x86-64, not Alpine) and add a PostgreSQL database.
+2. Create `/site/private/opentj.env` (see the next section).
+3. In the Web Terminal:
 
-## 2. Extract a fresh release
+   ```sh
+   mkdir -p /site/private/opentj && cd /site/private/opentj
+   curl -fsSLO https://github.com/tenshifan79/openTJ/releases/latest/download/deploy.sh
+   sh deploy.sh
+   ```
 
-Use Director's **Node.js 22.9 (Debian)** image with OpenSSL and CA certificates.
-This archive is for Linux x86-64 (`uname -m` must print `x86_64`), not Alpine.
+   `deploy.sh` verifies the checksum, extracts into
+   `/site/private/opentj/releases/<id>/`, applies migrations and the production
+   seed, points the `current` symlink at the new release and, if Director has
+   no `run.sh` yet, creates `/site/run.sh`.
+4. Click **Restart process** once. Check **Process Log**, then
+   `https://<site>.sites.tjhsst.edu/api/health`.
 
-In the Web Terminal:
+## Configuration
 
-```sh
-cd /site/private
-sha256sum -c SHA256SUMS
+`/site/private/opentj.env` holds everything except the database, in dotenv
+format. Keep it out of Git and out of `public/`.
+
+```dotenv
+APP_URL=https://opentj.sites.tjhsst.edu
+ION_REDIRECT_URI=https://opentj.sites.tjhsst.edu/api/v1/auth/ion/callback
+ION_CLIENT_ID=
+ION_CLIENT_SECRET=
+ION_AUTHORIZE_URL=https://ion.tjhsst.edu/oauth/authorize/
+ION_TOKEN_URL=https://ion.tjhsst.edu/oauth/token/
+ION_PROFILE_URL=https://ion.tjhsst.edu/api/profile
+ION_REVOKE_URL=https://ion.tjhsst.edu/oauth/revoke_token/
+SESSION_SECRET=
+BOOTSTRAP_ADMIN_ION_IDS=
+STORAGE_DRIVER=disabled
+TRUST_PROXY=true
 ```
 
-Stop if verification fails. Otherwise:
+- **Database.** Director injects `DATABASE_URL`/`DIRECTOR_DATABASE_URL`; never
+  copy the URL into this file, because Director can change it. The launcher
+  adds `connection_limit=3` unless the URL already sets one (`OPENTJ_DB_POOL`
+  changes the number).
+- **Ion.** Register a *Confidential*, *Authorization code* application at
+  `https://ion.tjhsst.edu/oauth/applications/` with the redirect URI above. Ion
+  shows the client secret only when it is created.
+- **Session secret.** Generate it on the host so it never leaves it:
+  `printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> /site/private/opentj.env`
+- **Uploads.** Director has no object storage or virus scanner and limits
+  request bodies to 2 MB, so `STORAGE_DRIVER=disabled` turns PDF notes off; the
+  upload API answers 503 and everything else works. Use `STORAGE_DRIVER=s3`
+  with the `S3_*` and `CLAMAV_*` settings from `.env.example`, and run
+  `worker.sh` on a host with enough memory, to enable them.
+- **Proxy.** Director's proxy overwrites `X-Forwarded-For` with the client
+  address, so `TRUST_PROXY=true` gives per-client rate limits. Without it every
+  visitor shares one sign-in limit.
+
+The web process refuses to start while required settings are missing and
+prints the reason in the Process Log. `run.sh` retries by itself (at most a
+minute apart), so the site comes up shortly after the file is fixed.
+
+## Updating and rolling back
 
 ```sh
-release_dir="/site/private/opentj-$(date +%Y%m%d-%H%M%S)"
-mkdir "$release_dir"
-tar -xzf /site/private/opentj-director-linux-x64.tar.gz -C "$release_dir"
-cat "$release_dir/build-info.json"
+sh /site/private/opentj/current/deploy.sh             # latest release
+sh /site/private/opentj/current/deploy.sh <tag>       # a specific release
+sh /site/private/opentj/current/deploy.sh --rollback  # previous release
 ```
 
-Keep the printed release directory path for the steps below. Each update uses a
-new directory; avoid extracting over a running release.
+The running server notices the new `current` release within a few seconds and
+switches to it; no Director restart is needed. The previous release stays
+installed for `--rollback`. A rollback does not undo database migrations, so
+take a `pg_dump` before a release that changes the schema.
 
-## 3. Set configuration and migrate
+## Memory
 
-Store production environment settings in `/site/private/opentj.env` using the
-dotenv format from `.env.example`, with permissions `chmod 600`. Keep this file
-outside Git and the release directories. Director's injected DATABASE_URL takes
-precedence over the file; DIRECTOR_DATABASE_URL is also accepted as a fallback.
+With stock settings the server starts near 60 MiB of private memory and passed
+220 MiB under load in testing, which Director kills. `run.sh` therefore sets:
 
-Required configuration includes:
+- `--optimize-for-size --max-semi-space-size=1`: V8 collects early instead of
+  sizing its heap from the host's RAM; `--max-old-space-size=96` is a ceiling
+  for safety, well above the usual 50-60 MiB heap
+- one glibc malloc arena with low trim thresholds, so native memory is returned
+- a three-connection database pool
 
-- APP_URL=https://opentj.sites.tjhsst.edu
-- ION_REDIRECT_URI=https://opentj.sites.tjhsst.edu/api/v1/auth/ion/callback
-- ION_CLIENT_ID and ION_CLIENT_SECRET from the confidential authorization-code app
-- A random SESSION_SECRET of at least 32 characters
-- STORAGE_DRIVER=s3 and private S3 bucket, region, endpoint and credentials
-- CLAMAV_HOST/CLAMAV_PORT for a reachable scanner used by the worker
-- BOOTSTRAP_ADMIN_ION_IDS for the intended initial administrator
+Measured with these settings on Node 22.9.0: about 42 MiB at start, 65 MiB
+after every page has been loaded and 75-80 MiB after sustained load. Override
+with `OPENTJ_NODE_FLAGS`, the `MALLOC_*` variables or `OPENTJ_DB_POOL`.
 
-Launch scripts enforce production mode and disable demo login. Web and worker
-startup check required configuration before serving. Set OPENTJ_ENV_FILE if the
-configuration file lives elsewhere. Never paste credentials into logs or chat.
+Director stops restarting a site after five failed starts, so `run.sh` also
+restarts the server itself if it exits (set `OPENTJ_SUPERVISE=0` on hosts that
+supervise processes). `prisma migrate deploy` peaks near 150 MiB and leans on
+Director's swap for a few seconds during a deploy. If the site still runs
+short, ask director@tjhsst.edu for a higher memory limit.
 
-Migrations and the idempotent production seed only require the database:
+## Not available on Director
+
+The PDF worker (`worker.sh`) needs ClamAV and more memory than a site gets. It
+also performs the hourly retention sweep; run it once from the Web Terminal
+when needed:
 
 ```sh
-sh "$release_dir/migrate.sh"
+sh /site/private/opentj/current/worker.sh --once
 ```
-
-No npm install or Prisma generation is needed here. The seed creates the course
-structure without development personas. Take a database backup before future
-schema upgrades; changing release directories does not roll back migrations.
-
-## 4. Start the web process
-
-Set the applicable Director run.sh to execute this release, using its actual
-absolute path. For example:
-
-```sh
-#!/bin/sh
-exec sh /site/private/opentj-YYYYMMDD-HHMMSS/run.sh
-```
-
-Director checks `/site/run.sh`, `/site/private/run.sh`, then `/site/public/run.sh`
-in that order. Update the first existing file or create `/site/private/run.sh`
-if none exists. Keep a copy of an existing script before replacing it, mark the
-script executable and click **Restart process**. The package uses Director's
-PORT and HOST, falling back to 8080 and 0.0.0.0.
-
-## 5. Run the PDF worker separately
-
-The worker requires the same database, private S3 bucket and scanner access:
-
-```sh
-sh /site/private/opentj-YYYYMMDD-HHMMSS/worker.sh
-```
-
-Use a supervised worker service with enough memory; a Web Terminal is useful for
-diagnostics but is not a persistent worker service. The web startup script does
-not launch another worker into Director's constrained web allocation. Uploaded
-PDFs remain quarantined until a configured worker scans them successfully.
-
-## Memory limits
-
-The package removes installation and compilation from Director. It does not
-guarantee the web process fits in 100 MB. The package smoke test prints its Linux
-process RSS after a few requests; this is a small baseline, not a load test or
-the total container memory. PDF parsing/scanning needs separate capacity. Request
-more memory if Director still kills the prepared web process.
