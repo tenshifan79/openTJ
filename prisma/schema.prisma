@@ -28,6 +28,7 @@ enum ContentKind {
   CALENDAR_UPDATE
   NOTE
   ADVICE
+  DISCUSSION_REPLY
   QUESTION
 }
 
@@ -58,11 +59,27 @@ enum NoteMode {
   PLAIN_TEXT
   MARKDOWN_LATEX
   PDF
+  GOOGLE
+}
+
+enum MaterialTag {
+  NOTES
+  PRACTICE_ASSESSMENT
+  SAMPLE_QUESTIONS
+  OTHER
 }
 
 enum AdviceType {
   GENERAL
   ASSESSMENT_SPECIFIC
+  QUESTION
+}
+
+enum DiscussionReactionKind {
+  WONDERING
+  MAKES_SENSE
+  AGREE
+  DISAGREE
 }
 
 enum QuestionType {
@@ -152,6 +169,8 @@ model User {
   appealsResolved   Appeal[]           @relation("AppealResolver")
   auditEvents       AuditEvent[]
   policyAcceptances PolicyAcceptance[]
+  discussionReactions DiscussionReaction[]
+  endorsedDiscussionReplies DiscussionReply[]
 }
 
 model Session {
@@ -190,6 +209,7 @@ model Course {
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
   memberships   CourseMembership[]
+  periods       CoursePeriod[]
   joinCodes     CourseJoinCode[]
   contentItems  ContentItem[]
   questionBanks QuestionBank[]
@@ -204,13 +224,28 @@ model CourseMembership {
   courseId  String
   userId    String
   role      CourseRole @default(MEMBER)
+  periodId  String?
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
   course    Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  period    CoursePeriod? @relation(fields: [periodId, courseId], references: [id, courseId], onDelete: NoAction)
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([courseId, userId])
   @@index([userId, role])
+  @@index([periodId, courseId])
+}
+
+model CoursePeriod {
+  id          String             @id @default(cuid())
+  courseId    String
+  label       String
+  course      Course             @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  memberships CourseMembership[]
+  events      CalendarEvent[]
+
+  @@unique([id, courseId])
+  @@unique([courseId, label])
 }
 
 model RoleGrant {
@@ -260,6 +295,8 @@ model ContentItem {
   calendarUpdate    CalendarUpdate?
   note              Note?
   advice            AdvicePost?
+  discussionReply   DiscussionReply?
+  discussionReactions DiscussionReaction[]
   question          Question?
   reports           Report[]
   moderationActions ModerationAction[]
@@ -294,7 +331,7 @@ model Assessment {
   contentItem   ContentItem                  @relation(fields: [contentItemId, courseId], references: [id, courseId], onDelete: Cascade)
   topics        AssessmentTopic[]
   templates     AssessmentQuestionTemplate[]
-  calendarEvent CalendarEvent?
+  calendarEvents CalendarEvent[]
   questionBank  QuestionBank?
   advicePosts   AdvicePost[]
 
@@ -334,12 +371,17 @@ model CalendarEvent {
   startDate     DateTime?         @db.Date
   endDate       DateTime?         @db.Date
   assessmentId  String?
+  periodId      String?
+  confirmedAt   DateTime?
+  removedAt     DateTime?
   contentItem   ContentItem       @relation(fields: [contentItemId, courseId], references: [id, courseId], onDelete: Cascade)
   assessment    Assessment?       @relation(fields: [assessmentId, courseId], references: [contentItemId, courseId], onDelete: Cascade)
+  period        CoursePeriod?     @relation(fields: [periodId, courseId], references: [id, courseId], onDelete: NoAction)
   updates       CalendarUpdate[]
 
   @@unique([contentItemId, courseId])
-  @@unique([assessmentId, courseId])
+  @@index([assessmentId, courseId, periodId])
+  @@index([periodId, courseId])
   @@index([courseId, startDate])
   @@index([courseId, startsAt])
 }
@@ -361,7 +403,9 @@ model Note {
   courseId      String
   title         String
   mode          NoteMode
+  tag           MaterialTag @default(NOTES)
   body          String?
+  googleUrl     String?
   uploadId      String?     @unique
   contentItem   ContentItem @relation(fields: [contentItemId, courseId], references: [id, courseId], onDelete: Cascade)
   upload        Upload?     @relation(fields: [uploadId, courseId], references: [id, courseId], onDelete: Restrict)
@@ -369,6 +413,7 @@ model Note {
   @@unique([contentItemId, courseId])
   @@unique([uploadId, courseId])
   @@index([courseId, title])
+  @@index([courseId, tag])
 }
 
 model AdvicePost {
@@ -378,11 +423,44 @@ model AdvicePost {
   title         String
   body          String
   assessmentId  String?
+  pinnedAt      DateTime?
   contentItem   ContentItem @relation(fields: [contentItemId, courseId], references: [id, courseId], onDelete: Cascade)
   assessment    Assessment? @relation(fields: [assessmentId, courseId], references: [contentItemId, courseId], onDelete: Cascade)
+  replies       DiscussionReply[]
 
   @@unique([contentItemId, courseId])
   @@index([courseId, type, assessmentId])
+}
+
+model DiscussionReply {
+  contentItemId  String           @id
+  courseId       String
+  threadId       String
+  replyToId      String?
+  body           String
+  endorsedAt     DateTime?
+  endorsedById   String?
+  contentItem    ContentItem      @relation(fields: [contentItemId, courseId], references: [id, courseId], onDelete: Cascade)
+  thread         AdvicePost       @relation(fields: [threadId, courseId], references: [contentItemId, courseId], onDelete: Cascade)
+  replyTo        DiscussionReply? @relation("DiscussionReplyTo", fields: [replyToId, threadId], references: [contentItemId, threadId], onDelete: NoAction)
+  repliesTo      DiscussionReply[] @relation("DiscussionReplyTo")
+  endorsedBy     User?            @relation(fields: [endorsedById], references: [id], onDelete: SetNull)
+
+  @@unique([contentItemId, courseId])
+  @@unique([contentItemId, threadId])
+  @@index([courseId, threadId])
+  @@index([replyToId])
+}
+
+model DiscussionReaction {
+  contentItemId String
+  userId        String
+  kind          DiscussionReactionKind
+  contentItem   ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([contentItemId, userId])
+  @@index([userId])
 }
 
 model QuestionBank {

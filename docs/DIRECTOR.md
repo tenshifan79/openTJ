@@ -63,7 +63,8 @@ TRUST_PROXY=true
   schema (PostgreSQL 15 and later; migrations fail with `permission denied for
   schema public`). `OPENTJ_DB_SCHEMA=opentj` keeps all tables in a schema the
   site owns, which the first migration creates. In Director's Database shell
-  run `SET search_path TO opentj;` before querying.
+  run `SET search_path TO opentj;` before querying. Keep the existing schema
+  setting when upgrading a site with course data.
 - **Ion.** Register a *Confidential*, *Authorization code* application at
   `https://ion.tjhsst.edu/oauth/applications/` with the redirect URI above. Ion
   shows the client secret only when it is created. If sign-in ends on the login
@@ -72,11 +73,10 @@ TRUST_PROXY=true
   invalid_client`, for example, means the client ID or secret here is wrong.
 - **Session secret.** Generate it on the host so it never leaves it:
   `printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> /site/private/opentj.env`
-- **Uploads.** Director has no object storage or virus scanner and limits
-  request bodies to 2 MB, so `STORAGE_DRIVER=disabled` turns PDF notes off; the
-  upload API answers 503 and everything else works. Use `STORAGE_DRIVER=s3`
-  with the `S3_*` and `CLAMAV_*` settings from `.env.example`, and run
-  `worker.sh` on a host with enough memory, to enable them.
+- **Materials.** Use Drive, Docs, and Slides links on Director. To keep previously
+  approved PDFs readable, use `STORAGE_DRIVER=s3` and the private `S3_*` settings
+  in `.env.example`. `PDF_UPLOADS_ENABLED=true` enables new PDF submissions in
+  local development.
 - **Proxy.** Director's proxy overwrites `X-Forwarded-For` with the client
   address, so `TRUST_PROXY=true` gives per-client rate limits. Without it every
   visitor shares one sign-in limit.
@@ -95,8 +95,11 @@ sh /site/private/opentj/current/deploy.sh --rollback  # previous release
 
 The running server notices the new `current` release within a few seconds and
 switches to it; no Director restart is needed. The previous release stays
-installed for `--rollback`. A rollback does not undo database migrations, so
-take a `pg_dump` before a release that changes the schema.
+installed for `--rollback`. Before upgrading the schema, restore a database
+and private object backup into staging, apply the release migrations, and
+verify member access, a legacy bookmark, period dates, and a stored PDF if
+configured. To recover the pre-upgrade data, restore the matching database and
+object backup before starting the previous release.
 
 ## Memory
 

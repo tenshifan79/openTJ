@@ -14,16 +14,21 @@ export const ionProfileSchema = z
     username: z.string().min(1).max(100).optional(),
     full_name: z.string().min(1).max(200).optional(),
     display_name: z.string().min(1).max(200).optional(),
-    // ION stores these as nullable and sends null for an account without them.
     first_name: z.string().max(100).nullish(),
     last_name: z.string().max(100).nullish(),
-    is_student: z.boolean().optional().default(false),
-    is_teacher: z.boolean().optional().default(false),
+    is_student: z.boolean().optional(),
+    is_teacher: z.boolean().optional(),
   })
   .transform((profile, context) => {
     const username = profile.ion_username ?? profile.username;
     if (!username) { context.addIssue({ code: "custom", message: "ION username is missing" }); return z.NEVER; }
-    return { ...profile, username };
+    const hasRole = profile.is_student !== undefined || profile.is_teacher !== undefined;
+    return {
+      ...profile,
+      username,
+      isStudent: profile.is_student === true || (!hasRole && /^[0-9]/.test(username)),
+      isTeacher: profile.is_teacher === true && profile.is_student !== true,
+    };
   });
 
 function oauthConfiguration() {
@@ -138,8 +143,8 @@ async function upsertIonUser(profile: z.infer<typeof ionProfileSchema>): Promise
           ionId,
           username: profile.username,
           displayName: displayName || profile.username,
-          isStudent: profile.is_student,
-          isTeacher: profile.is_teacher,
+          isStudent: profile.isStudent,
+          isTeacher: profile.isTeacher,
         },
       })
     : await db.user.create({
@@ -147,8 +152,8 @@ async function upsertIonUser(profile: z.infer<typeof ionProfileSchema>): Promise
           ionId,
           username: profile.username,
           displayName: displayName || profile.username,
-          isStudent: profile.is_student,
-          isTeacher: profile.is_teacher,
+          isStudent: profile.isStudent,
+          isTeacher: profile.isTeacher,
         },
       });
 

@@ -9,7 +9,7 @@ test("course screens remain accessible in dark mode at each viewport", async ({ 
   await signInAs(page, "Student member");
   await page.getByRole("button", { name: "Theme: system. Change theme" }).click();
   await page.getByRole("button", { name: "Theme: light. Change theme" }).click();
-  for (const [section, title] of [["calendar", "Calendar"], ["assessments", "Assessments"], ["notes", "Notes"], ["advice", "Advice"], ["questions", "Sample Questions"]]) {
+  for (const [section, title] of [["calendar", "Calendar"], ["assessments", "Assessments"], ["discussion", "Discussion"], ["materials", "Materials"], ["questions", "Sample Questions"]]) {
     await page.goto(`/courses/concrete-math-av-p4/${section}`);
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -23,16 +23,19 @@ test("course screens remain accessible in dark mode at each viewport", async ({ 
 });
 
 test("calendar saves an event and attributed update across reload", async ({ page }, info) => {
-  await signInAs(page, "Student member");
+  await signInAs(page, "Course staff");
   await page.goto("/courses/concrete-math-av-p4/calendar");
+  const calendarPeriod = page.getByRole("combobox", { name: "Show events for", exact: true });
+  await calendarPeriod.selectOption({ label: "Period 4" });
   await page.getByRole("button", { name: "Add event", exact: true }).click();
   const dialog = page.getByRole("dialog");
   const title = `Fictional calendar check ${info.project.name} ${Date.now()}`;
   const date = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   await dialog.getByLabel("Title", { exact: true }).fill(title);
+  await dialog.getByRole("combobox", { name: "Period", exact: true }).selectOption({ label: "Period 4" });
   await dialog.getByLabel("Start date", { exact: true }).fill(date);
   await dialog.getByLabel("Details", { exact: true }).fill("Fictional reminder created by automated local verification.");
-  const policy = dialog.getByRole("checkbox", { name: /read and accept/ });
+  const policy = dialog.getByRole("checkbox", { name: /accept the contribution policy/i });
   if (await policy.count()) await policy.check();
   await dialog.getByRole("button", { name: "Publish", exact: true }).click();
   await expect(dialog).not.toBeVisible();
@@ -41,13 +44,14 @@ test("calendar saves an event and attributed update across reload", async ({ pag
   await page.locator(".fc-list-event-title").getByText(title, { exact: true }).click();
   const selected = page.getByRole("complementary", { name: "Selected calendar item" });
   await expect(selected.getByRole("heading", { name: title, exact: true })).toBeVisible();
-  await selected.getByRole("button", { name: "Add attributed update" }).click();
+  await selected.getByRole("button", { name: "Add update" }).click();
   const update = `Fictional shared update ${Date.now()}`;
   await dialog.getByLabel("Content", { exact: true }).fill(update);
   await dialog.getByRole("button", { name: "Publish", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(selected.getByText(update, { exact: true })).toBeVisible();
   await page.reload();
+  await calendarPeriod.selectOption({ label: "Period 4" });
   await page.getByRole("button", { name: "Agenda", exact: true }).click();
   await page.locator(".fc-list-event-title").getByText(title, { exact: true }).click();
   await expect(selected.getByText(update, { exact: true })).toBeVisible();

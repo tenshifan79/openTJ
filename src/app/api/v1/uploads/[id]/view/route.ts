@@ -1,10 +1,11 @@
 import { AppError, withApi } from "@/lib/server/http";
 import { sha256 } from "@/lib/server/crypto";
 import { authorizedUpload } from "@/lib/server/uploads";
-import { readObject } from "@/lib/server/storage";
+import { readObject, uploadsDisabled } from "@/lib/server/storage";
 export const GET = withApi<{ params: Promise<{ id: string }> }>(async (request, context) => {
   const { id } = await context.params;
   const upload = await authorizedUpload(request, id, true);
+  if (uploadsDisabled()) throw new AppError(503, "FILE_STORAGE_UNAVAILABLE", "Stored PDFs are unavailable.");
   const bytes = await readObject(upload.objectKey);
   if (bytes.length !== upload.bytes || sha256(bytes) !== upload.sha256) throw new AppError(409, "FILE_INTEGRITY_FAILED", "This file failed its integrity check.");
   return new Response(new Uint8Array(bytes), { headers: {

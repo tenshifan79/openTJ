@@ -1,6 +1,7 @@
 "use client";
-import { useState } from "react";
+
 import Link from "next/link";
+import { useState } from "react";
 import { api } from "@/lib/client/api";
 
 export function PolicyAcceptance({ signedIn, accepted }: { signedIn: boolean; accepted: boolean }) {
@@ -8,17 +9,18 @@ export function PolicyAcceptance({ signedIn, accepted }: { signedIn: boolean; ac
   const [done, setDone] = useState(accepted);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  if (!signedIn) return <p><a className="button button-primary" href="/login">Sign in to accept the policy</a></p>;
-  if (done) return <p className="notice notice-success" role="status">You have accepted this version. <Link href="/courses">Go to courses</Link></p>;
-  return <form onSubmit={async (event) => {
-    event.preventDefault(); if (!checked || pending) return;
+  if (!signedIn) return <div className="policy-action"><Link className="button button-primary" href="/login?returnTo=%2Fpolicy">Sign in to accept the policy</Link></div>;
+  if (done) return <p className="policy-action policy-accepted" role="status">Policy accepted.</p>;
+  return <form className="policy-action stack" onSubmit={async (event) => {
+    event.preventDefault();
+    if (!checked || pending) return;
     setPending(true); setError("");
     try { await api("/policy/accept", { body: {} }); setDone(true); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to save acceptance."); }
     finally { setPending(false); }
   }}>
-    <label className="check-row"><input type="checkbox" checked={checked} onChange={event => setChecked(event.target.checked)} required /> I have read and agree to follow this policy before posting.</label>
-    <button className="button button-primary" disabled={!checked || pending} type="submit">{pending ? "Saving…" : "Accept policy"}</button>
+    <label className="check-row"><input type="checkbox" checked={checked} onChange={event => setChecked(event.target.checked)} required /> I agree to follow this policy.</label>
+    <div><button className="button button-primary" disabled={!checked || pending} type="submit">{pending ? "Saving…" : "Accept policy"}</button></div>
     {error && <p className="notice notice-danger" role="alert">{error}</p>}
   </form>;
 }

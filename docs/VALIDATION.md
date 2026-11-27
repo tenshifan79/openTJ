@@ -1,5 +1,24 @@
 # Delivery validation
 
+## Course redesign
+
+Local checks use Node.js 22.9.0 and disposable PostgreSQL databases. The period
+verifier creates a class, enrolls two students, and checks that their schedules
+differ while discussion and materials are shared. The browser suite covers
+posting, policy acceptance with a draft, replies, reactions, moderation, search,
+and the Google preview fallback across desktop, tablet, and mobile.
+
+The upgrade rehearsal starts with the original migrations and seeded legacy
+records. It verifies the P4 backfill, old bookmarks, report and revision history,
+private practice history, and authenticated access to an approved PDF. A separate
+restore check recovers the pre-upgrade database snapshot. See the
+[Director release guide](DIRECTOR.md) for the deployment rehearsal and
+[README](../README.md#verification) for the test commands.
+
+Live checks require an Ion account, a restricted school Google file, and the
+deployment’s staging environment. The browser preview test supplies a restricted
+Google response and checks that the file link remains available.
+
 ## Node 22.9 compatibility update
 
 The compatibility update was checked on Windows with the official Node 22.9.0

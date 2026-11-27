@@ -4,11 +4,14 @@ import { useState } from "react";
 import { DateTime } from "luxon";
 import { api, type ContentKind } from "@/lib/client/api";
 import { useAppData } from "@/lib/client/store";
+import { materialTags } from "@/lib/materials";
+import { ContributionPolicyConsent, useContributionPolicy } from "./contribution-policy-consent";
 import { AsyncForm, Modal } from "./ui";
 import { RichContent } from "./rich-content";
 
 export function ContentEditor({ kind, item, initial, onClose, eventId }: { kind: ContentKind; item?: object; initial?: Record<string, unknown>; onClose(): void; eventId?: string }) {
-  const { slug, data, user, mutate } = useAppData();
+  const { slug, data, mutate } = useAppData();
+  const { needsConsent, acceptPolicy } = useContributionPolicy();
   const value = (item ?? initial ?? {}) as Record<string, unknown>;
   const str = (key: string, fallback = "") => String(value[key] ?? fallback);
   const list = (key: string, separator = "\n") => ((value[key] as string[] | undefined) ?? []).join(separator);
@@ -20,18 +23,28 @@ export function ContentEditor({ kind, item, initial, onClose, eventId }: { kind:
   const [body, setBody] = useState(str(kind === "QUESTION" ? "prompt" : "body"));
   const [upload, setUpload] = useState<{ id: string } | null>(value.uploadId ? { id: str("uploadId") } : null);
   const banks = data?.assessments.filter(assessment => assessment.major && assessment.visibility === "PUBLISHED") ?? [];
-  const title = `${item ? "Edit" : "Add"} ${kind.toLowerCase().replaceAll("_", " ")}`;
+  const title = `${item ? "Edit" : "Add"} ${kind === "NOTE" ? "material" : kind.toLowerCase().replaceAll("_", " ")}`;
   const text = (name: string, label: string, required = false, rows?: number, fallback = "") => <label className="field"><span>{label}</span>{rows ? <textarea className="textarea" defaultValue={str(name, fallback)} maxLength={30000} name={name} required={required} rows={rows} /> : <input className="input" defaultValue={str(name, fallback)} maxLength={200} name={name} required={required} />}</label>;
   const timeValue = (key: string) => allDay ? str(key).slice(0,10) : value[key] ? DateTime.fromISO(str(key), { zone: "America/New_York" }).toFormat("yyyy-MM-dd'T'HH:mm") : "";
+  const choosePeriod = Boolean(data?.permissions.canModerate && data.periods.length);
+  const periodField = choosePeriod && <label className="field"><span>Period</span>
+    <select className="select" name="periodId" defaultValue={str("periodId")}>
+      <option value="">All periods</option>
+      {data?.periods.map((period) => <option key={period.id} value={period.id}>{period.label}</option>)}
+    </select>
+  </label>;
   return <Modal onClose={onClose} open title={title}><AsyncForm label={item ? "Save changes" : "Publish"} onCancel={onClose} onSubmit={async form => {
     const get = (key: string) => String(form.get(key) ?? "").trim();
     const lines = (key: string, separator = "\n") => get(key).split(separator).map(part => part.trim()).filter(Boolean);
-    if (!user?.policyAccepted) await api("/policy/accept", { body: {} });
+    await acceptPolicy(form);
     let payload: Record<string, unknown> = { kind, ...(item ? { version: value.version } : {}) };
-    if (kind === "ASSESSMENT") payload = { ...payload, title: get("title"), assessmentType: get("assessmentType"), summary: get("summary"), description: get("description"), topics: lines("topics", ","), templates: lines("templates"), major: form.has("major"), ...(get("date") ? { date: get("date") } : {}), addToCalendar: form.has("calendar") && Boolean(get("date")) };
+    if (kind === "ASSESSMENT") {
+      const date = item ? "" : get("date");
+      payload = { ...payload, title: get("title"), assessmentType: get("assessmentType"), summary: get("summary"), description: get("description"), topics: lines("topics", ","), templates: lines("templates"), major: form.has("major"), ...(date ? { date } : {}), addToCalendar: Boolean(date), ...(date && choosePeriod ? { periodId: get("periodId") || null } : {}) };
+    }
     if (kind === "CALENDAR_EVENT") {
-      const instant = (key: string) => { const parsed = DateTime.fromISO(get(key), { zone: "America/New_York" }); if (!parsed.isValid || parsed.toFormat("yyyy-MM-dd'T'HH:mm") !== get(key)) throw new Error("Enter a valid Eastern time; this time may fall in the daylight-saving gap."); return parsed.toISO(); };
-      payload = { ...payload, title: get("title"), eventType: get("eventType"), start: allDay ? get("start") : instant("start"), end: get("end") ? allDay ? get("end") : instant("end") : null, allDay, details: get("details") };
+      const instant = (key: string) => { const parsed = DateTime.fromISO(get(key), { zone: "America/New_York" }); if (!parsed.isValid || parsed.toFormat("yyyy-MM-dd'T'HH:mm") !== get(key)) throw new Error("Enter a valid Eastern time."); return parsed.toISO(); };
+      payload = { ...payload, title: get("title"), eventType: get("eventType"), start: allDay ? get("start") : instant("start"), end: get("end") ? allDay ? get("end") : instant("end") : null, allDay, details: get("details"), ...(!item && choosePeriod ? { periodId: get("periodId") || null } : {}) };
     }
     if (kind === "CALENDAR_UPDATE") payload = { ...payload, calendarEventId: eventId ?? value.eventId, body: get("body") };
     if (kind === "NOTE") {
@@ -46,7 +59,7 @@ export function ContentEditor({ kind, item, initial, onClose, eventId }: { kind:
         }
         if (!uploadId) throw new Error("Choose a PDF to upload.");
       }
-      payload = { ...payload, title: get("title"), mode, body: mode === "PDF" ? "" : get("body"), uploadId: mode === "PDF" ? uploadId : null };
+      payload = { ...payload, title: get("title"), tag: get("tag"), mode, body: get("body"), googleUrl: mode === "Google link" ? get("googleUrl") : null, uploadId: mode === "PDF" ? uploadId : null };
     }
     if (kind === "ADVICE") payload = { ...payload, title: get("title"), type, body: get("body"), assessmentId: type === "ASSESSMENT_SPECIFIC" ? get("assessmentId") : null };
     if (kind === "QUESTION") {
@@ -65,17 +78,23 @@ export function ContentEditor({ kind, item, initial, onClose, eventId }: { kind:
       <label className="field"><span>Topics (comma separated)</span><input className="input" defaultValue={list("topics", ", ")} name="topics" /></label>
       <label className="field"><span>Question templates (one per line)</span><textarea className="textarea" defaultValue={list("templates")} name="templates" rows={3} /></label>
       <label className="check-row"><input defaultChecked={Boolean(value.major)} name="major" type="checkbox" /> Major assessment with a question bank</label>
-      {!value.date ? <><label className="field"><span>Calendar date (optional)</span><input className="input" name="date" type="date" /></label><label className="check-row"><input defaultChecked name="calendar" type="checkbox" /> Add to course calendar when a date is supplied</label></> : <p className="muted small">Edit the linked calendar event to change the assessment date.</p>}
+      {!item && <><label className="field"><span>Calendar date (optional)</span><input className="input" name="date" type="date" /></label>{periodField}</>}
     </> : null}
     {kind === "CALENDAR_EVENT" ? <>
       <label className="field"><span>Type</span><select className="select" defaultValue={str("kind", "assignment")} name="eventType">{["assignment", "assessment", "reminder", "other"].map(option => <option key={option}>{option}</option>)}</select></label>
+      {!item && periodField}
       <label className="check-row"><input checked={allDay} onChange={event => setAllDay(event.target.checked)} type="checkbox" /> All-day event</label>
       <div className="form-grid"><label className="field"><span>Start {allDay ? "date" : "(Eastern time)"}</span><input className="input" defaultValue={timeValue("start")} key={`start-${allDay}`} name="start" required type={allDay ? "date" : "datetime-local"} /></label><label className="field"><span>End (optional{allDay ? ", exclusive date" : ", Eastern time"})</span><input className="input" defaultValue={timeValue("end")} key={`end-${allDay}`} name="end" type={allDay ? "date" : "datetime-local"} /></label></div>
       {text("details", "Details", false, 4)}
     </> : null}
-    {kind === "NOTE" ? <label className="field"><span>Format</span><select className="select" onChange={event => setMode(event.target.value)} value={mode}>{["Plain text", "Markdown + LaTeX", "PDF"].map(option => <option key={option}>{option}</option>)}</select></label> : null}
+    {kind === "NOTE" ? <>
+      <label className="field"><span>Tag</span><select className="select" defaultValue={str("tag", "NOTES")} name="tag">{Object.entries(materialTags).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+      <label className="field"><span>Format</span><select className="select" onChange={event => setMode(event.target.value)} value={mode}>{["Plain text", "Markdown + LaTeX", "Google link", ...(data?.permissions.pdfUploadsEnabled || value.mode === "PDF" ? ["PDF"] : [])].map(option => <option key={option}>{option}</option>)}</select></label>
+    </> : null}
     {kind === "ADVICE" ? <><label className="field"><span>Section</span><select className="select" onChange={event => setType(event.target.value)} value={type}><option value="GENERAL">General Advice</option><option value="ASSESSMENT_SPECIFIC">Assignment/Assessment Advice</option></select></label>{type === "ASSESSMENT_SPECIFIC" ? <label className="field"><span>Assignment or assessment</span><select className="select" defaultValue={str("assessmentId")} name="assessmentId" required><option value="">Choose an assessment</option>{data?.assessments.filter(item => item.visibility === "PUBLISHED").map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label> : null}</> : null}
-    {kind === "NOTE" && mode === "PDF" ? <><label className="field"><span>{upload ? "Replace PDF (optional)" : "PDF file"}</span><input accept="application/pdf,.pdf" className="input" name="file" required={!upload} type="file" /></label><p className="muted small">Maximum 20 MiB and 200 pages. Your note appears after the file passes validation and malware scanning.</p></> : ["NOTE", "ADVICE", "CALENDAR_UPDATE"].includes(kind) ? <><label className="field"><span>Content{mode === "Markdown + LaTeX" || kind === "ADVICE" ? " (Markdown + LaTeX)" : ""}</span><textarea className="textarea long-editor" maxLength={30000} name="body" onChange={event => setBody(event.target.value)} required rows={8} value={body} /></label>{mode === "Markdown + LaTeX" || kind === "ADVICE" ? <><button className="button" onClick={() => setPreview(!preview)} type="button">{preview ? "Hide" : "Show"} preview</button>{preview ? <RichContent source={body} /> : null}</> : null}</> : null}
+    {kind === "NOTE" && mode === "Google link" ? <label className="field"><span>Google Drive, Docs, or Slides link</span><input className="input" defaultValue={str("googleUrl")} maxLength={1200} name="googleUrl" required type="url" /></label> : null}
+    {kind === "NOTE" && mode === "PDF" && data?.permissions.pdfUploadsEnabled ? <label className="field"><span>{upload ? "Replace PDF (optional)" : "PDF file (up to 20 MiB)"}</span><input accept="application/pdf,.pdf" className="input" name="file" required={!upload} type="file" /></label> : null}
+    {(kind === "NOTE" && ["Plain text", "Markdown + LaTeX"].includes(mode)) || kind === "ADVICE" || kind === "CALENDAR_UPDATE" ? <><label className="field"><span>Content{mode === "Markdown + LaTeX" || kind === "ADVICE" ? " (Markdown + LaTeX)" : ""}</span><textarea className="textarea long-editor" maxLength={30000} name="body" onChange={event => setBody(event.target.value)} required rows={8} value={body} /></label>{mode === "Markdown + LaTeX" || kind === "ADVICE" ? <><button className="button" onClick={() => setPreview(!preview)} type="button">{preview ? "Hide" : "Show"} preview</button>{preview ? <RichContent source={body} /> : null}</> : null}</> : null}
     {kind === "QUESTION" ? <>
       <label className="field"><span>Major assessment</span><select className="select" defaultValue={str("assessmentId", banks[0]?.id)} disabled={Boolean(item)} name="assessmentId" required>{banks.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
       <label className="field"><span>Question type</span><select className="select" onChange={event => setType(event.target.value)} value={type}><option value="SINGLE_CHOICE">Single choice</option><option value="SHORT_ANSWER">Short answer</option><option value="LONG_RESPONSE">Long response</option></select></label>
@@ -87,6 +106,6 @@ export function ContentEditor({ kind, item, initial, onClose, eventId }: { kind:
       {item ? <p className="muted small">Saving creates a new question revision. Earlier attempts retain the original question.</p> : null}
       <label className="check-row"><input name="authorized" required type="checkbox" /> I affirm this question is original or authorized and does not reproduce secured assessment material.</label>
     </> : null}
-    {!user?.policyAccepted ? <label className="check-row"><input required type="checkbox" /> I have read and accept the <a href="/policy" rel="noreferrer" target="_blank">contribution policy</a>.</label> : null}
+    {needsConsent && <ContributionPolicyConsent />}
   </AsyncForm></Modal>;
 }

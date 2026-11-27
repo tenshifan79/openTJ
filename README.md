@@ -1,9 +1,8 @@
 # openTJ
 
 A compact, student-contributed course workspace with ION OAuth authentication.
-The initial course is **Concrete Math AV - P4**. The app includes shared calendars,
-assessment details, attributed notes and advice, interactive practice banks,
-course membership, moderation, appeals and platform administration.
+The initial course is **Concrete Math AV - P4**. Courses have period schedules,
+assessment details, shared discussions and materials, and interactive practice banks.
 
 OpenTJ is independent and is not an official ION, CSL, TJHSST or FCPS service.
 The production seed contains the course structure without fictional assessment content.
@@ -19,6 +18,8 @@ keeps its data inside this checkout; it does not install a system service.
 For the existing Director deployment, see [Node 22.9 setup](docs/NODE-22.9.md).
 For a host with too little memory to install/build, use the
 [prepared Director deployment package](docs/DIRECTOR.md).
+For permission rules, course data, and migration checks, see the
+[contributor guide](docs/CONTRIBUTING.md).
 
 ```powershell
 npm ci
@@ -29,23 +30,24 @@ npm run db:local
 Leave the database terminal open. In a second terminal:
 
 ```powershell
+npm run db:generate
 npm run db:migrate
 npm run db:seed
 npm run dev
 ```
 
 Visit **http://127.0.0.1:3000** and choose a development persona. The seeded join
-code is `concrete-p4-demo`; staff can rotate it in course administration. Student
-members can post, the nonmember must join, the assigned teacher can moderate,
-the unassigned teacher has no automatic course access, and the administrator
-can create courses and manage roles. The suspended persona is refused access.
+code is `concrete-p4-demo`. Assigned staff can rotate it in class settings.
+The development personas cover enrolled students, staff, a teacher without class
+membership, a platform administrator, and a suspended account.
 
 `setup:local` creates `.env` only when absent, generates a random session secret,
 and uses PostgreSQL port 54329. It preserves existing configuration. Use the same
 origin in the browser and `APP_URL`; mutation requests from other origins are rejected.
 The Windows database helper also handles non-ASCII profile paths through short paths.
 
-For PDF uploads on Windows, run this once, then start the worker in another terminal:
+To test PDF uploads locally, set `PDF_UPLOADS_ENABLED=true` on the development
+server. On Windows, set up ClamAV once and start the worker in another terminal:
 
 ```powershell
 powershell -NoProfile -File scripts/setup-clamav.ps1
@@ -74,21 +76,23 @@ take several minutes. The app's readiness endpoint is `/api/health`.
 
 ## Using the workspace
 
-- Join a course using its code or ask assigned staff to add your username.
-- Create assessments with topics, question templates, descriptions and optional dates.
-  A major assessment creates its question bank. Calendar linking is idempotent.
-- Add shared events and attributed updates. Authors and assigned staff can edit
-  event details; drag/resize changes require confirmation. Dates use Eastern time.
-- Publish plain text, Markdown with LaTeX, or a PDF note. Every contribution shows
-  its author and timestamps. PDF notes publish only after validation and scanning.
-- Share general advice or advice linked to a particular assessment.
+- Join a class with its code and select your period. Ion teachers and counselors
+  can create classes and manage their rosters, periods, and join codes.
+- Add assessment details and period dates. A major assessment creates a question
+  bank. Students can contribute dates for their own period. Staff can confirm or
+  correct them and schedule events for the whole class. Dates use Eastern time.
+- Ask a question or share advice in Discussion. Members across periods can reply
+  and react. Staff can pin a thread or endorse a reply.
+- Add text, Markdown with LaTeX, or a Google Drive, Docs, or Slides link in
+  Materials. Use tags to find notes and practice. Google manages file access.
+  Previously approved PDFs remain available to course members.
 - Add original choice, short text, numeric or long response practice questions.
   Check answers by button or Enter; long responses retain normal newlines and use
   Ctrl/Cmd+Enter for comparison. Solutions require an explicit reveal.
 - Edit or hide your own work, report inappropriate content, and appeal takedowns.
   Staff can hide, restore or lock contributions with a recorded reason.
-- Administrators can create/archive courses, assign staff, grant/revoke platform
-  roles and restrict accounts. Teacher status alone does not grant moderation.
+- Administrators archive courses, assign staff, manage platform roles, and restrict
+  accounts. Staff moderation follows class membership.
 
 Accept the contribution policy before first posting. The policy is publicly readable
 at `/policy`. Practice history is private to the student and can be cleared.
@@ -173,13 +177,15 @@ expiry until the student clears their history.
 
 ## Verification
 
-Run the database, web app and scanner worker before HTTP/browser tests:
+Run the database and web app before HTTP/browser tests. Enable local PDF uploads
+and start the scanner worker to run `test:uploads`.
 
 ```powershell
 npm run lint
 npm run typecheck
 npm test
 npm run test:api
+npm run test:periods
 npm run test:uploads
 npx playwright install chromium
 npm run test:e2e
@@ -194,5 +200,5 @@ API verification uses a temporary fictional course and archives it afterward.
 Upload/browser tests create clearly fictional contributions in the development
 course. Run these only against a local test environment. Inspect `test-results/`
 and `playwright-report/` for local results. See [the implementation plan](docs/IMPLEMENTATION.md)
-for the original work breakdown and [validation notes](docs/VALIDATION.md) for the
-verified delivery results and remaining external checks.
+for the original work breakdown and [validation notes](docs/VALIDATION.md) for
+historical delivery checks.

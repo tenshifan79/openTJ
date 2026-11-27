@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { isPlatformAdmin, requireUser, type CourseAccess } from "./auth";
-import { claimVersion, contentInclude, getContent, recordRevision, serializeContentForRead } from "./content";
+import { claimVersion, contentInclude, getContent, publicParentsWhere, recordRevision, serializeContentForRead, visibleWhere } from "./content";
 import { db } from "./db";
 import { AppError } from "./http";
 
@@ -11,9 +11,10 @@ export async function submitReport(access: CourseAccess, input: z.infer<typeof r
   const item = await getContent(access, input.contentId);
   if (item.visibility !== "PUBLISHED") throw new AppError(400, "NOT_PUBLISHED", "This item is already hidden or awaiting processing.");
   return db.$transaction(async (tx) => {
+    if (item.discussionReply) await tx.$queryRaw`SELECT id FROM "ContentItem" WHERE id = ${item.discussionReply.threadId} FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM "ContentItem" WHERE id = ${item.id} FOR UPDATE`;
-    const current = await tx.contentItem.findUnique({ where: { id: item.id }, select: { visibility: true } });
-    if (current?.visibility !== "PUBLISHED") throw new AppError(409, "NOT_PUBLISHED", "This contribution has already been hidden.");
+    const current = await tx.contentItem.findFirst({ where: { id: item.id, visibility: "PUBLISHED", AND: [visibleWhere(access), publicParentsWhere()] }, select: { id: true } });
+    if (!current) throw new AppError(409, "NOT_PUBLISHED", "This contribution has already been hidden.");
     const previous = await tx.report.findFirst({ where: { contentItemId: item.id, reporterId: access.user.id, status: "OPEN" } });
     if (previous) return { id: previous.id, status: previous.status };
     const report = await tx.report.create({ data: { courseId: access.course.id, contentItemId: item.id, reporterId: access.user.id, reason: input.reason, details: input.details } });
@@ -24,7 +25,8 @@ export async function submitReport(access: CourseAccess, input: z.infer<typeof r
 export async function moderate(access: CourseAccess, input: z.infer<typeof moderationSchema>, requestId: string) {
   if (!access.canModerate) throw new AppError(403, "COURSE_STAFF_REQUIRED", "Course staff access is required.");
   const item = await getContent(access, input.contentId);
-  if (item.authorId === access.user.id) throw new AppError(403, "INDEPENDENT_REVIEW_REQUIRED", "Another staff member must moderate your contribution.");
+  const closingOwnThread = item.kind === "ADVICE" && !input.reportId && ["LOCK", "UNLOCK"].includes(input.action);
+  if (item.authorId === access.user.id && !closingOwnThread) throw new AppError(403, "INDEPENDENT_REVIEW_REQUIRED", "Another staff member must moderate your contribution.");
   const report = input.reportId ? await db.report.findFirst({ where: { id: input.reportId, courseId: access.course.id, contentItemId: item.id } }) : null;
   if (input.reportId && !report) throw new AppError(404, "REPORT_NOT_FOUND", "Report not found for this contribution.");
   if (input.action === "DISMISS_REPORT" && !report) throw new AppError(400, "REPORT_REQUIRED", "Choose the report to dismiss.");
@@ -50,8 +52,8 @@ export async function moderate(access: CourseAccess, input: z.infer<typeof moder
   return serializeContentForRead(await getContent(access, item.id), access);
 }
 
-function itemTitle(item: { assessment: { title: string } | null; calendarEvent: { title: string } | null; note: { title: string } | null; advice: { title: string } | null; question: { revisions: { prompt: string }[] } | null; calendarUpdate: { body: string } | null }) {
-  return item.assessment?.title ?? item.calendarEvent?.title ?? item.note?.title ?? item.advice?.title ?? item.question?.revisions[0]?.prompt.slice(0, 150) ?? item.calendarUpdate?.body.slice(0, 150) ?? "Contribution";
+function itemTitle(item: { assessment: { title: string } | null; calendarEvent: { title: string } | null; note: { title: string } | null; advice: { title: string } | null; question: { revisions: { prompt: string }[] } | null; calendarUpdate: { body: string } | null; discussionReply: { body: string } | null }) {
+  return item.assessment?.title ?? item.calendarEvent?.title ?? item.note?.title ?? item.advice?.title ?? item.discussionReply?.body.slice(0, 150) ?? item.question?.revisions[0]?.prompt.slice(0, 150) ?? item.calendarUpdate?.body.slice(0, 150) ?? "Contribution";
 }
 export async function moderationSnapshot(request: Request) {
   const user = await requireUser(request);
