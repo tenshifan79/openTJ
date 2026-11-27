@@ -13,6 +13,10 @@ export function isDemoAuthEnabled(): boolean {
   return process.env.NODE_ENV !== "production" && getAppEnvironment() === "local" && process.env.DEMO_AUTH_ENABLED === "true";
 }
 
+export function isPdfUploadEnabled(): boolean {
+  return process.env.NODE_ENV !== "production" && getAppEnvironment() === "local" && process.env.PDF_UPLOADS_ENABLED === "true" && process.env.STORAGE_DRIVER !== "disabled";
+}
+
 export function getRequiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) {

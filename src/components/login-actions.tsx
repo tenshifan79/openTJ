@@ -13,7 +13,7 @@ const personas = [
   { label: "Suspended user", value: "suspended-user" },
 ] as const;
 
-export function LoginActions({ development = false }: { development?: boolean }) {
+export function LoginActions({ development = false, returnTo = "/courses" }: { development?: boolean; returnTo?: string }) {
   const router = useRouter();
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +31,7 @@ export function LoginActions({ development = false }: { development?: boolean })
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.error?.message ?? "The development session could not be started. Check that the database is running and seeded.");
       }
-      router.push("/courses");
+      router.push(returnTo);
       router.refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The preview session could not be started.");
@@ -42,12 +42,11 @@ export function LoginActions({ development = false }: { development?: boolean })
 
   return (
     <>
-      <a className="button button-primary oauth-button" href="/api/v1/auth/ion/start?returnTo=%2Fcourses">
+      <a className="button button-primary oauth-button" href={`/api/v1/auth/ion/start?returnTo=${encodeURIComponent(returnTo)}`}>
         <ShieldCheck aria-hidden="true" /> Sign in with ION <ArrowRight aria-hidden="true" />
       </a>
       {development ? <div className="demo-box">
         <strong>Local development</strong>
-        <p className="muted small" style={{ margin: "3px 0 0" }}>Use a fictional persona while ION credentials are not configured.</p>
         <div className="demo-grid">
           {personas.map((persona) => (
             <button className="button" disabled={pending !== null} key={persona.value} onClick={() => demoLogin(persona.value)} type="button">

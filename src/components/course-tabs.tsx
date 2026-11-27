@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarDays, ClipboardList, FileText, Lightbulb, MessageSquareText } from "lucide-react";
+import { CalendarDays, ClipboardList, FileText, MessageSquareText } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAppData } from "@/lib/client/store";
@@ -8,9 +8,8 @@ import { useAppData } from "@/lib/client/store";
 const tabs = [
   { label: "Calendar", href: "calendar", icon: CalendarDays },
   { label: "Assessments", href: "assessments", icon: ClipboardList },
-  { label: "Notes", href: "notes", icon: FileText },
-  { label: "Advice", href: "advice", icon: Lightbulb },
-  { label: "Sample Questions", href: "questions", icon: MessageSquareText },
+  { label: "Discussion", href: "discussion", icon: MessageSquareText },
+  { label: "Materials", href: "materials", icon: FileText },
 ];
 
 export function CourseTabs() {
@@ -21,7 +20,8 @@ export function CourseTabs() {
       {tabs.map((tab) => {
         const Icon = tab.icon;
         const href = `/courses/${slug}/${tab.href}`;
-        const active = pathname === href;
+        const legacyMaterials = [`/courses/${slug}/notes`, `/courses/${slug}/questions`];
+        const active = pathname === href || pathname.startsWith(`${href}/`) || (tab.href === "materials" && legacyMaterials.includes(pathname));
         return (
           <Link aria-current={active ? "page" : undefined} className={`course-tab${active ? " active" : ""}`} href={{ pathname: href }} key={tab.href} title={tab.label}>
             <Icon aria-hidden="true" />

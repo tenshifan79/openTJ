@@ -49,10 +49,18 @@ export async function runRetention(now = new Date()) {
         await tx.contentItem.updateMany({ where: { visibility: "PUBLISHED", calendarUpdate: { calendarEventId: item.id } }, data: { visibility: "HIDDEN_BY_MODERATOR", hiddenAt: now, version: { increment: 1 } } });
       } else if (item.kind === "CALENDAR_UPDATE") await tx.calendarUpdate.update({ where: { contentItemId: item.id }, data: { body: REMOVED } });
       else if (item.kind === "NOTE") {
-        await tx.note.updateMany({ where: { contentItemId: item.id, mode: { not: "PDF" } }, data: { title: REMOVED, body: REMOVED } });
+        await tx.note.updateMany({ where: { contentItemId: item.id, mode: { not: "PDF" } }, data: { title: REMOVED, body: REMOVED, mode: "PLAIN_TEXT", googleUrl: null } });
         await tx.note.updateMany({ where: { contentItemId: item.id, mode: "PDF" }, data: { title: REMOVED, body: null } });
       }
-      else if (item.kind === "ADVICE") await tx.advicePost.update({ where: { contentItemId: item.id }, data: { title: REMOVED, body: REMOVED } });
+      else if (item.kind === "ADVICE") {
+        await tx.advicePost.update({ where: { contentItemId: item.id }, data: { title: REMOVED, body: REMOVED, pinnedAt: null } });
+        await tx.discussionReaction.deleteMany({ where: { contentItem: { OR: [{ id: item.id }, { discussionReply: { threadId: item.id } }] } } });
+        await tx.contentItem.updateMany({ where: { visibility: "PUBLISHED", discussionReply: { threadId: item.id } }, data: { visibility: "HIDDEN_BY_MODERATOR", hiddenAt: now, version: { increment: 1 } } });
+      }
+      else if (item.kind === "DISCUSSION_REPLY") {
+        await tx.discussionReply.update({ where: { contentItemId: item.id }, data: { body: REMOVED, endorsedAt: null, endorsedById: null } });
+        await tx.discussionReaction.deleteMany({ where: { contentItemId: item.id } });
+      }
       else if (item.kind === "QUESTION") {
         await tx.questionRevision.updateMany({ where: { questionId: item.id }, data: { prompt: REMOVED, canonicalAnswer: null, acceptedAnswers: Prisma.DbNull, numericAnswer: null, detailedSolution: null, unit: null } });
         await tx.questionChoice.updateMany({ where: { revision: { questionId: item.id } }, data: { text: REMOVED, explanation: null, isCorrect: false } });

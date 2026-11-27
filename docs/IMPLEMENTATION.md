@@ -1,4 +1,6 @@
-# Implementation and verification plan
+# Original implementation and verification plan
+
+For current course behavior and extension points, see the [contributor guide](CONTRIBUTING.md).
 
 The starting checkout contained a Next.js interface, a Prisma schema, OAuth helpers,
 and localStorage preview interactions. This delivery connects the existing interface

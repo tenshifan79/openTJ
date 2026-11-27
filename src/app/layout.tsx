@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: { default: "openTJ", template: "%s · openTJ" },
-  description: "Student-contributed course collaboration for the TJ community.",
+  description: "Course calendars, materials, and discussions for TJ.",
   applicationName: "openTJ",
   icons: { icon: "/favicon.svg" },
   robots: { index: false, follow: false },
@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#0048ab",
+  themeColor: "#343942",
 };
 
 const themeScript = `

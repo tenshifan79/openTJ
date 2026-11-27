@@ -1,27 +1,45 @@
 import { Prisma, type ContentKind, type Visibility } from "@prisma/client";
 import { z } from "zod";
+import { googleMaterialLink, materialTags } from "@/lib/materials";
 import { assertCanChangeContent, requireCourseAccess, requirePolicyAccepted, type CourseAccess } from "./auth";
 import { db } from "./db";
 import { AppError } from "./http";
+import { isPdfUploadEnabled } from "./env";
 import { questionFlags } from "./question-flags";
 
 const title = z.string().trim().min(1).max(200);
 const body = z.string().trim().max(30_000);
 const labels = z.array(z.string().trim().min(1).max(300)).max(40);
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}(?:T.*)?$/).refine((value) => Number.isFinite(Date.parse(value)) && new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) === value.slice(0, 10), "Enter a valid date.");
+const schedulingPeriodId = z.string().min(1).max(100).nullable().optional();
 const eventFields = {
   title, start: date, end: date.optional().nullable(), allDay: z.boolean().default(true),
-  kind: z.enum(["assessment", "assignment", "reminder", "other"]).default("assignment"), details: body.default(""),
+  kind: z.enum(["assessment", "assignment", "reminder", "other"]).default("assignment"), details: body.default(""), periodId: schedulingPeriodId,
 };
 export const eventSchema = z.object(eventFields).refine((v) => !v.end || Date.parse(v.end) > Date.parse(v.start), "The end must follow the start.");
 export const assessmentSchema = z.object({
   title, kind: z.enum(["Test", "Quiz", "Assignment", "Other"]).default("Test"), summary: body.default(""), description: body.default(""),
   topics: labels.default([]), templates: labels.default([]), major: z.boolean().default(false),
-  addToCalendar: z.boolean().default(false), date: date.optional(),
+  addToCalendar: z.boolean().default(false), date: date.optional(), periodId: schedulingPeriodId,
 }).refine((v) => !v.addToCalendar || Boolean(v.date), "Choose a calendar date.");
+export const materialTagSchema = z.enum(Object.keys(materialTags) as [keyof typeof materialTags, ...(keyof typeof materialTags)[]]);
 export const noteSchema = z.object({
-  title, mode: z.enum(["Plain text", "Markdown + LaTeX", "PDF"]), body: body.optional(), uploadId: z.string().min(1).optional().nullable(),
-}).refine((v) => v.mode === "PDF" ? Boolean(v.uploadId) && !v.body : Boolean(v.body) && !v.uploadId, "Provide either a text body or a PDF upload.");
+  title,
+  mode: z.enum(["Plain text", "Markdown + LaTeX", "Google link", "PDF"]),
+  tag: materialTagSchema.default("NOTES"),
+  body: body.optional(),
+  googleUrl: z.string().trim().max(1200).optional().nullable(),
+  uploadId: z.string().min(1).optional().nullable(),
+}).superRefine((value, context) => {
+  if (value.mode === "Google link") {
+    if (!value.googleUrl || !googleMaterialLink(value.googleUrl)) context.addIssue({ code: "custom", path: ["googleUrl"], message: "Enter a Google Drive, Docs, or Slides file link." });
+    if (value.body || value.uploadId) context.addIssue({ code: "custom", path: ["mode"], message: "Choose one material format." });
+  } else if (value.mode === "PDF") {
+    if (!value.uploadId || value.body || value.googleUrl) context.addIssue({ code: "custom", path: ["uploadId"], message: "Choose a PDF file." });
+  } else if (!value.body || value.uploadId || value.googleUrl) {
+    context.addIssue({ code: "custom", path: ["body"], message: "Enter the material text." });
+  }
+}).transform((value) => ({ ...value, googleUrl: value.googleUrl ? googleMaterialLink(value.googleUrl)?.view : null }));
 export const adviceSchema = z.object({
   title, body: body.min(1), type: z.enum(["GENERAL", "ASSESSMENT_SPECIFIC"]), assessmentId: z.string().min(1).optional().nullable(),
 }).refine((v) => v.type === "ASSESSMENT_SPECIFIC" ? Boolean(v.assessmentId) : !v.assessmentId, "Assessment advice requires an assessment; general advice must not link one.");
@@ -43,11 +61,24 @@ export const questionSchema = z.object({
 // This selection intentionally cannot fetch answer keys or detailed solutions.
 export const contentInclude = Prisma.validator<Prisma.ContentItemInclude>()({
   author: { select: { displayName: true, username: true } },
-  assessment: { include: { topics: { orderBy: { position: "asc" } }, templates: { orderBy: { position: "asc" } }, calendarEvent: { include: { contentItem: { select: { visibility: true } } } }, questionBank: true } },
-  calendarEvent: { include: { assessment: { include: { contentItem: { select: { visibility: true } } } }, updates: { orderBy: { contentItem: { createdAt: "asc" } }, take: 200, include: { contentItem: { include: { author: { select: { displayName: true, username: true } } } } } } } },
+  assessment: { include: {
+    topics: { orderBy: { position: "asc" } },
+    templates: { orderBy: { position: "asc" } },
+    calendarEvents: {
+      where: { removedAt: null, contentItem: { visibility: { not: "DELETED" } } },
+      include: { contentItem: { select: { visibility: true, author: { select: { isStudent: true } } } } },
+    },
+    questionBank: true,
+  } },
+  calendarEvent: { include: {
+    contentItem: { select: { author: { select: { isStudent: true } } } },
+    assessment: { include: { contentItem: { select: { visibility: true } } } },
+    updates: { orderBy: { contentItem: { createdAt: "asc" } }, take: 200, include: { contentItem: { include: { author: { select: { displayName: true, username: true } } } } } },
+  } },
   calendarUpdate: true,
   note: { include: { upload: { select: { id: true, status: true, originalName: true, bytes: true, pages: true, failureReason: true } } } },
   advice: { include: { assessment: { select: { title: true } } } },
+  discussionReply: { include: { thread: { select: { title: true, contentItem: { select: { visibility: true } } } } } },
   question: { include: { bank: { include: { assessment: { select: { title: true } } } }, revisions: { orderBy: { revision: "desc" }, take: 1, select: {
     id: true, revision: true, type: true, prompt: true, shortAnswerMode: true, unit: true,
     choices: { orderBy: { position: "asc" }, select: { text: true } },
@@ -60,26 +91,47 @@ export function contentMetadata(item: Pick<ContentRecord, "id" | "authorId" | "v
     visibility: item.visibility, locked: item.locked, createdAt: item.createdAt.toISOString(), updatedAt: item.updatedAt.toISOString() };
 }
 function isoDate(value: Date | null | undefined) { return value?.toISOString().slice(0, 10) ?? ""; }
+function calendarStart(event: { allDay: boolean; startDate: Date | null; startsAt: Date | null }) {
+  return event.allDay ? isoDate(event.startDate) : event.startsAt?.toISOString() ?? "";
+}
 export function serializeContent(item: ContentRecord, access: CourseAccess) {
   const meta = contentMetadata(item);
   if (item.assessment) {
     const a = item.assessment;
-    const e = a.calendarEvent;
+    const periodId = access.membership?.periodId ?? null;
+    const e = a.calendarEvents.find((event) => event.periodId === periodId) ?? a.calendarEvents.find((event) => event.periodId === null);
     return { ...meta, title: a.title, kind: ({ TEST: "Test", QUIZ: "Quiz", ASSIGNMENT: "Assignment", OTHER: "Other" } as const)[a.type],
       summary: a.summary, description: a.description, topics: a.topics.map((t) => t.label), templates: a.templates.map((t) => t.description), major: a.isMajor,
-      date: e?.contentItem.visibility === "PUBLISHED" ? e.allDay ? isoDate(e.startDate) : e.startsAt?.toISOString() ?? "" : "", calendarEventId: e?.contentItemId ?? null, bankId: a.questionBank?.id ?? null };
+      date: e?.contentItem.visibility === "PUBLISHED" ? calendarStart(e) : "",
+      calendarEventId: e?.contentItem.visibility === "PUBLISHED" ? e.contentItemId : null,
+      confirmedAt: e?.contentItem.visibility === "PUBLISHED" ? e.confirmedAt?.toISOString() ?? null : null,
+      submittedByStudent: e?.contentItem.visibility === "PUBLISHED" ? e.contentItem.author.isStudent : false,
+      scheduledForPeriod: a.calendarEvents.some((event) => event.periodId === periodId),
+      bankId: a.questionBank?.id ?? null,
+      ...(access.canModerate ? { occurrences: a.calendarEvents.map((event) => ({
+        id: event.contentItemId,
+        periodId: event.periodId,
+        date: calendarStart(event),
+        visibility: event.contentItem.visibility,
+        confirmedAt: event.confirmedAt?.toISOString() ?? null,
+        submittedByStudent: event.contentItem.author.isStudent,
+      })) } : {}),
+    };
   }
   if (item.calendarEvent) {
     const e = item.calendarEvent;
-    return { ...meta, title: e.title, start: e.allDay ? isoDate(e.startDate) : e.startsAt?.toISOString(), end: e.allDay ? isoDate(e.endDate) || null : e.endsAt?.toISOString() ?? null,
-      allDay: e.allDay, kind: e.type.toLowerCase(), details: e.details, assessmentId: e.assessmentId, parentHidden: Boolean(e.assessment && e.assessment.contentItem.visibility !== "PUBLISHED"),
+    return { ...meta, title: e.title, start: calendarStart(e), end: e.allDay ? isoDate(e.endDate) || null : e.endsAt?.toISOString() ?? null,
+      allDay: e.allDay, kind: e.type.toLowerCase(), details: e.details, assessmentId: e.assessmentId, periodId: e.periodId,
+      confirmedAt: e.confirmedAt?.toISOString() ?? null, submittedByStudent: e.contentItem.author.isStudent,
+      parentHidden: Boolean(e.assessment && e.assessment.contentItem.visibility !== "PUBLISHED"),
       updates: e.updates.filter((u) => u.contentItem.visibility === "PUBLISHED" || u.contentItem.authorId === access.user.id || access.canModerate)
         .map((u) => ({ ...contentMetadata(u.contentItem), body: u.body, calendarEventId: e.contentItemId })) };
   }
   if (item.calendarUpdate) return { ...meta, body: item.calendarUpdate.body, calendarEventId: item.calendarUpdate.calendarEventId };
-  if (item.note) return { ...meta, title: item.note.title, mode: ({ PLAIN_TEXT: "Plain text", MARKDOWN_LATEX: "Markdown + LaTeX", PDF: "PDF" } as const)[item.note.mode],
-    body: item.note.body ?? "", uploadId: item.note.uploadId, uploadStatus: item.note.upload?.status ?? null, upload: item.note.upload };
+  if (item.note) return { ...meta, title: item.note.title, mode: ({ PLAIN_TEXT: "Plain text", MARKDOWN_LATEX: "Markdown + LaTeX", GOOGLE: "Google link", PDF: "PDF" } as const)[item.note.mode],
+    tag: item.note.tag, body: item.note.body ?? "", googleUrl: item.note.googleUrl, uploadId: item.note.uploadId, uploadStatus: item.note.upload?.status ?? null, upload: item.note.upload };
   if (item.advice) return { ...meta, title: item.advice.title, body: item.advice.body, type: item.advice.type, assessmentId: item.advice.assessmentId, assessment: item.advice.assessment?.title };
+  if (item.discussionReply) return { ...meta, title: item.discussionReply.thread.title, body: item.discussionReply.body, threadId: item.discussionReply.threadId, replyToId: item.discussionReply.replyToId };
   if (item.question) {
     const revision = item.question.revisions[0];
     return { ...meta, bankId: item.question.bankId, assessment: item.question.bank.assessment.title, assessmentId: item.question.bank.assessmentId,
@@ -89,8 +141,33 @@ export function serializeContent(item: ContentRecord, access: CourseAccess) {
   return meta;
 }
 
+export function calendarAudienceWhere(access: CourseAccess): Prisma.ContentItemWhereInput {
+  const periodId = access.membership?.periodId;
+  const audience: Prisma.CalendarEventWhereInput = { removedAt: null };
+  if (!access.canModerate) {
+    audience.OR = periodId ? [
+      { periodId },
+      { periodId: null, OR: [
+        { assessmentId: null },
+        { assessment: { calendarEvents: { none: {
+          periodId, removedAt: null, contentItem: { visibility: { not: "DELETED" } },
+        } } } },
+      ] },
+    ] : [{ periodId: null }];
+  }
+  return { AND: [
+    { OR: [{ calendarEvent: null }, { calendarEvent: audience }] },
+    { OR: [{ calendarUpdate: null }, { calendarUpdate: { calendarEvent: audience } }] },
+  ] };
+}
+
 export function visibleWhere(access: CourseAccess): Prisma.ContentItemWhereInput {
-  return { courseId: access.course.id, visibility: { not: "DELETED" }, ...(access.canModerate ? {} : { OR: [{ visibility: "PUBLISHED", ...publicParentsWhere() }, { authorId: access.user.id }] }) };
+  return {
+    courseId: access.course.id,
+    visibility: { not: "DELETED" },
+    AND: [calendarAudienceWhere(access), ...(access.canModerate ? [] : [discussionParentWhere()])],
+    ...(access.canModerate ? {} : { OR: [{ visibility: "PUBLISHED", ...publicParentsWhere() }, { authorId: access.user.id }] }),
+  };
 }
 export async function serializeManyContent(items: ContentRecord[], access: CourseAccess) {
   const flags = await questionFlags(items.flatMap((item) => item.question?.revisions.map((revision) => revision.id) ?? []));
@@ -105,10 +182,14 @@ export async function serializeContentForRead(item: ContentRecord, access: Cours
 }
 export function publicParentsWhere(): Prisma.ContentItemWhereInput {
   return { AND: [
+    discussionParentWhere(),
     { OR: [{ calendarEvent: null }, { calendarEvent: { OR: [{ assessmentId: null }, { assessment: { contentItem: { visibility: "PUBLISHED" } } }] } }] },
     { OR: [{ question: null }, { question: { bank: { active: true, assessment: { contentItem: { visibility: "PUBLISHED" } } } } }] },
     { OR: [{ calendarUpdate: null }, { calendarUpdate: { calendarEvent: { contentItem: { visibility: "PUBLISHED" }, OR: [{ assessmentId: null }, { assessment: { contentItem: { visibility: "PUBLISHED" } } }] } } }] },
   ] };
+}
+function discussionParentWhere(): Prisma.ContentItemWhereInput {
+  return { OR: [{ discussionReply: null }, { discussionReply: { thread: { contentItem: { visibility: "PUBLISHED" } } } }] };
 }
 export async function getContent(access: CourseAccess, id: string) {
   const item = await db.contentItem.findFirst({ where: { ...visibleWhere(access), id }, include: contentInclude });
@@ -136,6 +217,13 @@ export function calendarData(value: z.infer<typeof eventSchema>) {
     startsAt: value.allDay ? null : new Date(value.start), endsAt: !value.allDay && value.end ? new Date(value.end) : null };
 }
 
+type CalendarDates = Pick<ReturnType<typeof calendarData>, "allDay" | "startDate" | "endDate" | "startsAt" | "endsAt">;
+function sameCalendarDates(a: CalendarDates, b: CalendarDates) {
+  return a.allDay === b.allDay && a.startDate?.getTime() === b.startDate?.getTime() &&
+    a.endDate?.getTime() === b.endDate?.getTime() && a.startsAt?.getTime() === b.startsAt?.getTime() &&
+    a.endsAt?.getTime() === b.endsAt?.getTime();
+}
+
 export async function addQuestionRevision(tx: Prisma.TransactionClient, id: string, courseId: string, userId: string, revision: number, value: z.infer<typeof questionSchema>) {
   const skillIds: string[] = [];
   for (const name of [...new Set(value.skills)]) {
@@ -153,26 +241,105 @@ export async function addQuestionRevision(tx: Prisma.TransactionClient, id: stri
   } });
 }
 
+function assertCalendarWriteScope(access: CourseAccess, periodId: string | null) {
+  if (!access.canModerate && (access.membership?.periodId ?? null) !== periodId) {
+    throw new AppError(403, "CALENDAR_PERIOD_REQUIRED", "Choose your own period.");
+  }
+}
+
+async function selectedCalendarPeriod(tx: Prisma.TransactionClient, access: CourseAccess, requested: string | null | undefined) {
+  const periodId = requested === undefined ? access.membership?.periodId ?? null : requested;
+  assertCalendarWriteScope(access, periodId);
+  if (!periodId && !access.canModerate && await tx.coursePeriod.count({ where: { courseId: access.course.id } })) {
+    throw new AppError(409, "PERIOD_REQUIRED", access.user.isStudent ? "Choose your period before adding a date." : "Ask course staff to assign your period.");
+  }
+  if (periodId && !await tx.coursePeriod.findUnique({ where: { id_courseId: { id: periodId, courseId: access.course.id } } })) {
+    throw new AppError(400, "INVALID_PERIOD", "Choose a period for this course.");
+  }
+  return periodId;
+}
+
+async function lockAssessmentSchedule(tx: Prisma.TransactionClient, assessmentId: string) {
+  await tx.$queryRaw`SELECT id FROM "ContentItem" WHERE id = ${assessmentId} FOR UPDATE`;
+}
+
+async function linkAssessmentOccurrence(tx: Prisma.TransactionClient, access: CourseAccess, assessmentId: string, value: z.infer<typeof eventSchema>) {
+  const courseId = access.course.id;
+  const periodId = await selectedCalendarPeriod(tx, access, value.periodId);
+  await lockAssessmentSchedule(tx, assessmentId);
+  await assertPublishedReference(tx, courseId, assessmentId, "ASSESSMENT");
+  await tx.calendarEvent.updateMany({
+    where: { courseId, assessmentId, periodId, removedAt: null, contentItem: { visibility: "DELETED" } },
+    data: { removedAt: new Date() },
+  });
+  const existing = await tx.calendarEvent.findFirst({ where: { courseId, assessmentId, periodId, removedAt: null } });
+  const fields = calendarData({ ...value, kind: "assessment" });
+  if (existing) {
+    if (!sameCalendarDates(existing, fields)) throw new AppError(409, "SCHEDULE_EXISTS", "Edit the existing date in Calendar.");
+    return existing.contentItemId;
+  }
+  const now = new Date();
+  const item = await tx.contentItem.create({ data: { courseId, authorId: access.user.id, kind: "CALENDAR_EVENT", publishedAt: now } });
+  await tx.calendarEvent.create({ data: {
+    ...fields,
+    contentItemId: item.id, courseId, assessmentId, periodId, confirmedAt: access.canModerate ? now : null,
+  } });
+  await recordRevision(tx, item.id, 1, access.user.id, { ...value, kind: "assessment", periodId });
+  return item.id;
+}
+
 export async function linkAssessment(access: CourseAccess, id: string, input: unknown) {
   await requirePolicyAccepted(access.user.id);
   const value = eventSchema.parse(input);
-  const result = await db.$transaction(async (tx) => {
-    await assertPublishedReference(tx, access.course.id, id, "ASSESSMENT");
-    // Lock the parent row: concurrent requests cannot create competing calendar envelopes.
-    await tx.$queryRaw`SELECT id FROM "ContentItem" WHERE id = ${id} FOR UPDATE`;
-    const existing = await tx.calendarEvent.findUnique({ where: { assessmentId_courseId: { assessmentId: id, courseId: access.course.id } } });
-    if (existing) return existing.contentItemId;
-    const item = await tx.contentItem.create({ data: { courseId: access.course.id, authorId: access.user.id, kind: "CALENDAR_EVENT", publishedAt: new Date() } });
-    await tx.calendarEvent.create({ data: { contentItemId: item.id, courseId: access.course.id, assessmentId: id, ...calendarData(value) } });
-    await recordRevision(tx, item.id, 1, access.user.id, value);
-    return item.id;
-  });
+  const result = await db.$transaction((tx) => linkAssessmentOccurrence(tx, access, id, value));
   return serializeContentForRead(await getContent(access, result), access);
+}
+
+export const calendarActionSchema = z.object({
+  action: z.enum(["confirm", "remove"]),
+  version: z.number().int().positive(),
+});
+
+export async function changeCalendarOccurrence(access: CourseAccess, id: string, input: z.infer<typeof calendarActionSchema>, requestId: string) {
+  const item = await getContent(access, id);
+  const event = item.calendarEvent;
+  if (!event) throw new AppError(404, "CALENDAR_EVENT_NOT_FOUND", "Calendar event not found.");
+  if (input.action === "confirm" && !access.canModerate) throw new AppError(403, "COURSE_STAFF_REQUIRED", "Only course staff can confirm dates.");
+  if (input.action === "confirm" && (item.visibility !== "PUBLISHED" || event.assessment && event.assessment.contentItem.visibility !== "PUBLISHED")) {
+    throw new AppError(409, "CALENDAR_EVENT_HIDDEN", "Restore this event before confirming it.");
+  }
+  if (!access.canModerate && item.visibility === "HIDDEN_BY_MODERATOR") {
+    throw new AppError(403, "CONTENT_MODERATED", "Appeal this takedown to change the event.");
+  }
+  assertCalendarWriteScope(access, event.periodId);
+  await assertCanChangeContent(access.user.id, item);
+  await db.$transaction(async (tx) => {
+    if (event.assessmentId) await lockAssessmentSchedule(tx, event.assessmentId);
+    await claimVersion(tx, item.id, input.version);
+    const now = new Date();
+    if (input.action === "confirm") {
+      if (event.assessmentId) await assertPublishedReference(tx, access.course.id, event.assessmentId, "ASSESSMENT");
+      await tx.calendarEvent.update({ where: { contentItemId: item.id }, data: { confirmedAt: now } });
+    } else {
+      await tx.calendarEvent.update({ where: { contentItemId: item.id }, data: { removedAt: now } });
+      if (item.visibility === "PUBLISHED") {
+        await tx.contentItem.update({ where: { id: item.id }, data: { visibility: item.authorId === access.user.id ? "HIDDEN_BY_AUTHOR" : "HIDDEN_BY_MODERATOR", hiddenAt: now } });
+      }
+    }
+    await recordRevision(tx, item.id, input.version + 1, access.user.id, { action: input.action });
+    await tx.auditEvent.create({ data: {
+      actorId: access.user.id, courseId: access.course.id,
+      action: input.action === "confirm" ? "CONFIRM_EVENT" : "UNSCHEDULE_EVENT",
+      targetType: "ContentItem", targetId: item.id, requestId,
+    } });
+  });
+  return { id: item.id, updated: true };
 }
 
 export async function writeContent(access: CourseAccess, raw: Record<string, unknown>, existingId?: string) {
   await requirePolicyAccepted(access.user.id);
   const existing = existingId ? await getContent(access, existingId) : null;
+  if (existing?.discussionReply || existing?.advice?.type === "QUESTION") throw new AppError(400, "USE_DISCUSSION", "Edit this contribution in Discussion.");
   if (existing) {
     await assertCanChangeContent(access.user.id, existing);
     if (existing.visibility === "HIDDEN_BY_MODERATOR" && !access.canModerate) throw new AppError(403, "CONTENT_MODERATED", "Hidden material must be appealed before it can be changed.");
@@ -211,33 +378,50 @@ export async function writeContent(access: CourseAccess, raw: Record<string, unk
       if (v.major) await tx.questionBank.upsert({ where: { assessmentId: item.id }, create: { courseId, assessmentId: item.id, title: v.title }, update: { title: v.title, active: item.visibility === "PUBLISHED" } });
       else await tx.questionBank.updateMany({ where: { assessmentId: item.id }, data: { active: false } });
       if (v.addToCalendar && v.date) {
-        const linked = await tx.calendarEvent.findUnique({ where: { assessmentId_courseId: { assessmentId: item.id, courseId } } });
-        if (!linked) {
-          const event = await tx.contentItem.create({ data: { courseId, authorId: access.user.id, kind: "CALENDAR_EVENT", publishedAt: new Date() } });
-          const e = eventSchema.parse({ title: v.title, start: v.date, details: v.summary, kind: "assessment" });
-          await tx.calendarEvent.create({ data: { contentItemId: event.id, courseId, assessmentId: item.id, ...calendarData(e) } });
-          await recordRevision(tx, event.id, 1, access.user.id, e);
-        }
+        await linkAssessmentOccurrence(tx, access, item.id, eventSchema.parse({
+          title: v.title, start: v.date, details: v.summary, kind: "assessment", periodId: v.periodId,
+        }));
       }
     } else if (kind === "CALENDAR_EVENT") {
-      const fields = calendarData(parsed as z.infer<typeof eventSchema>);
-      await tx.calendarEvent.upsert({ where: { contentItemId: item.id }, create: { contentItemId: item.id, courseId, ...fields }, update: fields });
+      const value = parsed as z.infer<typeof eventSchema>;
+      const fields = calendarData(value);
+      const event = existing?.calendarEvent;
+      if (event) {
+        assertCalendarWriteScope(access, event.periodId);
+        if (value.periodId !== undefined && value.periodId !== event.periodId) throw new AppError(400, "CALENDAR_PERIOD_FIXED", "Create a separate event for another period.");
+        await tx.calendarEvent.update({ where: { contentItemId: item.id }, data: {
+          ...fields, ...(!access.canModerate && !sameCalendarDates(fields, event) ? { confirmedAt: null } : {}),
+        } });
+      } else {
+        const periodId = await selectedCalendarPeriod(tx, access, value.periodId);
+        await tx.calendarEvent.create({ data: { contentItemId: item.id, courseId, ...fields, periodId, confirmedAt: access.canModerate ? new Date() : null } });
+      }
     } else if (kind === "CALENDAR_UPDATE") {
       const v = parsed as { calendarEventId: string; body: string };
       const event = await assertPublishedReference(tx, courseId, v.calendarEventId, "CALENDAR_EVENT");
-      const visibleEvent = await tx.contentItem.findFirst({ where: { id: event.id, ...publicParentsWhere() }, select: { id: true } });
-      if (!visibleEvent) throw new AppError(400, "INVALID_REFERENCE", "The parent assessment is no longer published.");
+      const visibleEvent = await tx.contentItem.findFirst({ where: { id: event.id, AND: [calendarAudienceWhere(access), publicParentsWhere()] }, select: { id: true } });
+      if (!visibleEvent) throw new AppError(400, "INVALID_REFERENCE", "Choose an event on your calendar.");
       if (event.locked && !access.canModerate) throw new AppError(423, "CONTENT_LOCKED", "This event is locked for updates.");
       await tx.calendarUpdate.upsert({ where: { contentItemId: item.id }, create: { contentItemId: item.id, courseId, ...v }, update: { body: v.body } });
     } else if (kind === "NOTE") {
       const v = parsed as z.infer<typeof noteSchema>;
       let visibility: Visibility = existing?.visibility ?? "PUBLISHED";
-      if (v.mode === "PDF") {
+      if (v.mode === "PDF" && v.uploadId !== existing?.note?.uploadId) {
+        if (!isPdfUploadEnabled()) throw new AppError(503, "PDF_UPLOADS_DISABLED", "Add a Google Drive link instead.");
         const upload = await tx.upload.findFirst({ where: { id: v.uploadId!, ownerId: access.user.id, courseId } });
         if (!upload || ["REJECTED", "FAILED"].includes(upload.status)) throw new AppError(400, "INVALID_UPLOAD", "Choose your accepted PDF upload from this course.");
         if (upload.status !== "CLEAN") visibility = "QUARANTINED";
+        else if (visibility === "QUARANTINED") visibility = "PUBLISHED";
       }
-      const fields = { title: v.title, mode: ({ "Plain text": "PLAIN_TEXT", "Markdown + LaTeX": "MARKDOWN_LATEX", PDF: "PDF" } as const)[v.mode], body: v.mode === "PDF" ? null : v.body!, uploadId: v.mode === "PDF" ? v.uploadId : null };
+      if (v.mode !== "PDF" && visibility === "QUARANTINED") visibility = "PUBLISHED";
+      const fields = {
+        title: v.title,
+        mode: ({ "Plain text": "PLAIN_TEXT", "Markdown + LaTeX": "MARKDOWN_LATEX", "Google link": "GOOGLE", PDF: "PDF" } as const)[v.mode],
+        tag: v.tag,
+        body: v.mode === "PDF" || v.mode === "Google link" ? null : v.body!,
+        googleUrl: v.googleUrl ?? null,
+        uploadId: v.mode === "PDF" ? v.uploadId : null,
+      };
       await tx.note.upsert({ where: { contentItemId: item.id }, create: { contentItemId: item.id, courseId, ...fields }, update: fields });
       await tx.contentItem.update({ where: { id: item.id }, data: { visibility } });
     } else if (kind === "ADVICE") {
@@ -262,6 +446,7 @@ export async function writeContent(access: CourseAccess, raw: Record<string, unk
 
 export async function changeVisibility(access: CourseAccess, id: string, version: number, action: "hide" | "restore") {
   const item = await getContent(access, id);
+  if (item.calendarEvent) assertCalendarWriteScope(access, item.calendarEvent.periodId);
   await assertCanChangeContent(access.user.id, item);
   if (item.authorId !== access.user.id) throw new AppError(403, "USE_MODERATION", "Use moderation actions with a reason for another author's contribution.");
   if (item.visibility === "HIDDEN_BY_MODERATOR") throw new AppError(403, "CONTENT_MODERATED", "Course staff must restore moderated material.");

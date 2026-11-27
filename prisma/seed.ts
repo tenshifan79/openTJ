@@ -125,7 +125,15 @@ async function seedCourse(adminId: string) {
   return course;
 }
 
-async function seedDemoContent(courseId: string, studentId: string, teacherId: string) {
+async function seedPeriod(courseId: string) {
+  return prisma.coursePeriod.upsert({
+    where: { id: `${courseId}-p4` },
+    create: { id: `${courseId}-p4`, courseId, label: "Period 4" },
+    update: {},
+  });
+}
+
+async function seedDemoContent(courseId: string, periodId: string, studentId: string, teacherId: string) {
   const now = new Date();
 
   await prisma.contentItem.upsert({
@@ -185,11 +193,13 @@ async function seedDemoContent(courseId: string, studentId: string, teacherId: s
         create: {
           type: CalendarEventType.ASSESSMENT,
           title: "Fictional Sequences Review",
-          details: "Demo date only; this is not an actual assignment.",
+          details: "Review finite differences and recurrence relations.",
           allDay: true,
           startDate: new Date("2026-09-18T00:00:00.000Z"),
           endDate: new Date("2026-09-19T00:00:00.000Z"),
           assessmentId: ids.assessmentItem,
+          periodId,
+          confirmedAt: now,
         },
       },
     },
@@ -274,11 +284,12 @@ async function seedDemoContent(courseId: string, studentId: string, teacherId: s
 
 async function main() {
   if (!isLocalSeed()) {
-    await prisma.course.upsert({
+    const course = await prisma.course.upsert({
       where: { slug: "concrete-math-av-p4" },
       create: { id: ids.course, slug: "concrete-math-av-p4", name: "Concrete Math AV - P4", description: "Student-contributed resources for Concrete Math, period 4." },
       update: {},
     });
+    await seedPeriod(course.id);
     return;
   }
 
@@ -292,6 +303,7 @@ async function main() {
   }
 
   const course = await seedCourse(admin.id);
+  const period = await seedPeriod(course.id);
   for (const [userId, role] of [
     [student.id, CourseRole.MEMBER],
     [teacher.id, CourseRole.STAFF],
@@ -300,7 +312,7 @@ async function main() {
   ] as const) {
     await prisma.courseMembership.upsert({
       where: { courseId_userId: { courseId: course.id, userId } },
-      create: { courseId: course.id, userId, role },
+      create: { courseId: course.id, userId, role, periodId: role === CourseRole.MEMBER ? period.id : null },
       update: {},
     });
   }
@@ -321,7 +333,7 @@ async function main() {
       update: {},
     });
   }
-  await seedDemoContent(course.id, student.id, teacher.id);
+  await seedDemoContent(course.id, period.id, student.id, teacher.id);
 }
 
 main()

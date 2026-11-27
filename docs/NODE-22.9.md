@@ -4,7 +4,7 @@ Director currently supplies Node 22.9.0 and npm 10.8.3. `.nvmrc`, CI and the
 default Docker image use that exact Node release. Newer Node 22 patch releases
 remain supported and are preferable when the host makes them available.
 
-The application remains on Next.js 16.3.4 and Prisma 6.12.0. Compatibility pins
+The application uses Next.js 16.4.6 and Prisma 6.12.0. Compatibility pins
 apply to development tooling:
 
 - Vite 6.4.3 satisfies Vitest 4's supported dependency range without requiring

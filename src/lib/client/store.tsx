@@ -3,12 +3,13 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { CoursePeriodEnrollment } from "@/components/course-period-enrollment";
 import { api, ApiError, type ContentKind, type ContentMeta, type Course, type CourseData, type User } from "./api";
 
-type PagedKind = Exclude<ContentKind, "CALENDAR_UPDATE">;
+type PagedKind = Exclude<ContentKind, "CALENDAR_UPDATE" | "DISCUSSION_REPLY">;
 const collection = { ASSESSMENT: "assessments", CALENDAR_EVENT: "events", NOTE: "notes", ADVICE: "advice", QUESTION: "questions" } as const;
-const sectionKind: Record<string, PagedKind> = { assessments: "ASSESSMENT", calendar: "CALENDAR_EVENT", notes: "NOTE", advice: "ADVICE", questions: "QUESTION" };
-type Store = { user: User | null; courses: Course[]; isAdmin: boolean; canModerate: boolean; data: CourseData | null; slug: string; loading: boolean; error: string | null; linkedError: string | null; linkedLoading: boolean; refresh(): Promise<void>; loadMore(kind: PagedKind): Promise<void>; mutate(path: string, body?: unknown, method?: string): Promise<unknown> };
+const sectionKind: Record<string, PagedKind> = { assessments: "ASSESSMENT", calendar: "CALENDAR_EVENT", materials: "NOTE", notes: "NOTE", questions: "QUESTION" };
+type Store = { user: User | null; courses: Course[]; isAdmin: boolean; canModerate: boolean; data: CourseData | null; slug: string; loading: boolean; error: string | null; linkedId: string; linkedError: string | null; linkedLoading: boolean; refresh(): Promise<void>; acceptContributionPolicy(): Promise<void>; loadMore(kind: PagedKind): Promise<void>; mutate(path: string, body?: unknown, method?: string): Promise<unknown> };
 const Context = createContext<Store | null>(null);
 
 export function ApiDataProvider({ children }: { children: ReactNode }) {
@@ -33,7 +34,7 @@ export function ApiDataProvider({ children }: { children: ReactNode }) {
       const [session, listing, course] = await Promise.all([
         api<User | { user: User }>("/auth/session"),
         api<{ courses: Course[]; isAdmin: boolean }>("/courses"),
-        slug ? api<CourseData>(`/courses/${encodeURIComponent(slug)}`) : Promise.resolve(null),
+        slug ? api<CourseData>(`/courses/${encodeURIComponent(slug)}?view=compact`) : Promise.resolve(null),
       ]);
       if (requestGeneration !== generation.current) return;
       setUser("user" in session ? session.user : session); setCourses(listing.courses); setIsAdmin(listing.isAdmin); setData(course); setError(null);
@@ -111,6 +112,11 @@ export function ApiDataProvider({ children }: { children: ReactNode }) {
     return () => { controller.abort(); cancelAnimationFrame(frame); };
   }, [data, linkedUrl, slug]);
   const mutate = async (path: string, body?: unknown, method?: string) => { const result = await api(path, { body, method }); await refresh(); return result; };
+  async function acceptContributionPolicy() {
+    const userId = user?.id;
+    await api("/policy/accept", { body: {} });
+    setUser(current => current && current.id === userId ? { ...current, policyAccepted: true } : current);
+  }
   const loadMore = async (kind: PagedKind) => {
     const cursor = data?.nextCursors?.[kind]; if (!cursor) return;
     const page = await api<{ items: ContentMeta[]; nextCursor: string | null }>(`/courses/${encodeURIComponent(slug)}/content?kind=${kind}&limit=100&cursor=${encodeURIComponent(cursor)}`);
@@ -121,7 +127,8 @@ export function ApiDataProvider({ children }: { children: ReactNode }) {
     });
   };
   const canModerate = isAdmin || Boolean(data?.permissions.canModerate) || courses.some((course) => course.role === "STAFF");
-  return <Context.Provider value={{ user, courses, isAdmin, canModerate, data, slug, loading, error, linkedError, linkedLoading, refresh, loadMore, mutate }}>{children}</Context.Provider>;
+  const linkedId = linkedUrl ? new URL(linkedUrl).hash.slice(1) : "";
+  return <Context.Provider value={{ user, courses, isAdmin, canModerate, data, slug, loading, error, linkedId, linkedError, linkedLoading, refresh, acceptContributionPolicy, loadMore, mutate }}>{children}</Context.Provider>;
 }
 
 export function useAppData() { const value = useContext(Context); if (!value) throw new Error("ApiDataProvider is required."); return value; }
@@ -130,7 +137,14 @@ export function CourseGate({ children }: { children: ReactNode }) {
   const { loading, error, data, slug, refresh, linkedError, linkedLoading } = useAppData();
   if (loading) return <p role="status" className="empty-state">Loading course…</p>;
   if (error || !data || data.course.slug !== slug) return <div className="notice notice-warning" role="alert"><p>{error ?? "Course unavailable."}</p><Link className="button" href="/courses">Back to courses</Link> <button className="button" onClick={() => void refresh()} type="button">Retry</button></div>;
-  return <><CourseNotices notices={data.notices ?? []} />{linkedLoading ? <p role="status">Loading linked contribution…</p> : null}{linkedError ? <p className="notice notice-warning" role="alert">{linkedError}</p> : null}{children}<CoursePagination /></>;
+  return <>
+    <CourseNotices notices={data.notices ?? []} />
+    {data.user.isStudent && !data.permissions.canModerate && !data.periodId && data.periods.length > 0 && <CoursePeriodEnrollment slug={slug} periods={data.periods} onSaved={refresh} />}
+    {linkedLoading ? <p role="status">Loading linked contribution…</p> : null}
+    {linkedError ? <p className="notice notice-warning" role="alert">{linkedError}</p> : null}
+    {children}
+    <CoursePagination />
+  </>;
 }
 
 function CourseNotices({ notices }: { notices: NonNullable<CourseData["notices"]> }) {
@@ -152,7 +166,7 @@ function CoursePagination() {
   const { data, loadMore } = useAppData(); const pathname = usePathname();
   const [pending, setPending] = useState(false); const [error, setError] = useState("");
   const section = pathname.split("/")[3];
-  const kind = ({ assessments: "ASSESSMENT", calendar: "CALENDAR_EVENT", notes: "NOTE", advice: "ADVICE", questions: "QUESTION" } as Record<string, PagedKind>)[section ?? ""];
+  const kind = ({ assessments: "ASSESSMENT", calendar: "CALENDAR_EVENT", questions: "QUESTION" } as Record<string, PagedKind>)[section ?? ""];
   if (!kind || !data?.nextCursors?.[kind]) return null;
   return <div style={{ marginTop: 16 }}><button className="button" type="button" disabled={pending} onClick={async () => {
     setPending(true); setError(""); try { await loadMore(kind); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to load more contributions."); } finally { setPending(false); }

@@ -19,7 +19,7 @@ export function proxy(request: NextRequest) {
     // the per-response nonce, including the small initial theme script.
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:", "font-src 'self'",
-    "connect-src 'self'", "frame-src 'self'", "object-src 'none'",
+    "connect-src 'self'", "frame-src 'self' https://drive.google.com https://docs.google.com", "object-src 'none'",
     "base-uri 'self'", "form-action 'self' https://ion.tjhsst.edu",
     "frame-ancestors 'none'",
   ].join("; ");
